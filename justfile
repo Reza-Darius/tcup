@@ -15,6 +15,9 @@ test *args: clean_tap setcap
     # sudo `just find-test` --test {{ args }} --test-threads=1
     cargo test {{ args }}
 
+run:
+    sudo -E cargo run -- --no-capture
+
 test_send_recv *args: clean_tap
     just setup_tap_bridge
     cargo test{{ args }}

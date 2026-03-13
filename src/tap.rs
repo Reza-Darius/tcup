@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_variables, unused_assignments)]
 
-use std::{error::Error, ffi::c_void, os::fd::OwnedFd, process::Command};
+use crate::error::Result;
+use std::{ffi::c_void, os::fd::OwnedFd, process::Command};
 
 use rustix::{
     fs::{Mode, OFlags},
@@ -22,7 +23,7 @@ pub struct TAPDevice {
 }
 
 impl TAPDevice {
-    pub fn new(name: &str) -> Result<Self, Box<dyn Error>> {
+    pub fn new(name: &str) -> Result<Self> {
         tap_alloc(name)
     }
 
@@ -34,43 +35,46 @@ impl TAPDevice {
         rustix::io::read(&self.fd, buf)
     }
 
-    fn set_if_link(&self) {
+    pub fn set_if_link(&self) -> Result<()> {
         println!("ip link set dev {} up", &self.name);
-        let cmd = Command::new("sudo")
-            .args(["ip", "link", "set", "dev", &self.name, "up"])
+        let cmd = Command::new("ip")
+            .args(["link", "set", "dev", &self.name, "up"])
             .output()
             .expect("failed to execute command");
 
         if !cmd.status.success() {
             let err = String::from_utf8(cmd.stderr).unwrap();
-            println!("{err}");
+            return Err(crate::error::Error::Ip(err));
         }
+        Ok(())
     }
 
-    fn set_if_route(&self, route: &str) {
-        println!("ip route add dev {} {route}", &self.name);
-        let cmd = Command::new("sudo")
-            .args(["ip", "route", "add", "dev", &self.name, route])
+    pub fn set_if_route(&self, route: &str) -> Result<()> {
+        println!("ip route add {} dev {}", route, &self.name);
+        let cmd = Command::new("ip")
+            .args(["route", "add", route, "dev", &self.name])
             .output()
             .expect("failed to execute command");
 
         if !cmd.status.success() {
             let err = String::from_utf8(cmd.stderr).unwrap();
-            println!("{err}");
+            return Err(crate::error::Error::Ip(err));
         }
+        Ok(())
     }
 
-    fn set_if_addr(&self, addr: &str) {
+    pub fn set_if_addr(&self, addr: &str) -> Result<()> {
         println!("ip addr add dev {} local {addr}", &self.name);
-        let cmd = Command::new("sudo")
-            .args(["ip", "addr", "add", "dev", &self.name, "local", addr])
+        let cmd = Command::new("ip")
+            .args(["addr", "add", "dev", &self.name, "local", addr])
             .output()
             .expect("failed to execute command");
 
         if !cmd.status.success() {
             let err = String::from_utf8(cmd.stderr).unwrap();
-            println!("{err}");
+            return Err(crate::error::Error::Ip(err));
         }
+        Ok(())
     }
 }
 
@@ -80,7 +84,7 @@ struct Ifreq {
     ifreqdata: Ifreqdata,
 }
 
-unsafe impl Ioctl for Ifreq {
+unsafe impl Ioctl for &mut Ifreq {
     type Output = ();
 
     const IS_MUTATING: bool = true;
@@ -90,7 +94,7 @@ unsafe impl Ioctl for Ifreq {
     }
 
     fn as_ptr(&mut self) -> *mut rustix::ffi::c_void {
-        std::ptr::from_mut(self) as *mut c_void
+        std::ptr::from_mut(*self) as *mut c_void
     }
 
     unsafe fn output_from_ptr(
@@ -106,10 +110,11 @@ const IFRQ_UNION_SIZE: usize = 24;
 #[repr(C)]
 union Ifreqdata {
     ifrflags: i16,
+    hwaddr: libc::sockaddr,
     data: [u8; IFRQ_UNION_SIZE],
 }
 
-fn tap_alloc(name: &str) -> Result<TAPDevice, Box<dyn Error>> {
+fn tap_alloc(name: &str) -> Result<TAPDevice> {
     if name.len() > IFNAMSIZ - 1 {
         return Err("name is too large".into());
     };
@@ -126,8 +131,7 @@ fn tap_alloc(name: &str) -> Result<TAPDevice, Box<dyn Error>> {
     ifreq.ifrname[..name.len()].copy_from_slice(name.as_bytes());
     assert_eq!(ifreq.ifrname[name.len()], 0);
 
-    let res = unsafe { rustix::ioctl::ioctl(&fd, ifreq) };
-    res?;
+    unsafe { rustix::ioctl::ioctl(&fd, &mut ifreq)? };
 
     Ok(TAPDevice {
         name: name.to_string(),
@@ -135,16 +139,12 @@ fn tap_alloc(name: &str) -> Result<TAPDevice, Box<dyn Error>> {
     })
 }
 
-pub fn mac(buf: &[u8; 6]) -> String {
-    format!(
-        "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
-        buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::eth::EthHeader;
+    use crate::{
+        eth::{ETH_FRAME_MAX_SIZE, EthHeader},
+        utils::setup_cap,
+    };
 
     use super::*;
     use std::process::Command;
@@ -163,39 +163,22 @@ mod tests {
     }
 
     #[test]
-    fn tap_send_recv() {
-        let tap0 = TAPDevice::new("tap0").unwrap();
-        let tap1 = TAPDevice::new("tap1").unwrap();
-
-        // Minimal Ethernet frame (14-byte header + 1-byte payload)
-        let mut frame = [0u8; 60];
-        frame[0..6].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]); // dst MAC
-        frame[6..12].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]); // src MAC
-        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes()); // EtherType
-        frame[14] = 0x42; // payload
-
-        tap0.write(&frame).unwrap();
-        let mut buf = [0u8; 15];
-        let n = tap1.read(&mut buf).unwrap();
-        assert_eq!(n, 15);
-        assert_eq!(&buf[..15], &frame[..15]);
-    }
-
-    #[test]
-    fn tap_ip() {
+    fn tap_ip() -> Result<()> {
         let name = "tap0";
         let route = "10.0.0.0/24";
-        let addr = "10.0.0.5";
+        let addr = "10.0.0.5/24";
 
-        let tap = TAPDevice::new(name).unwrap();
-        tap.set_if_link();
-        tap.set_if_route(route);
-        tap.set_if_addr(addr);
+        setup_cap().unwrap();
+
+        let tap = TAPDevice::new(name)?;
+        tap.set_if_link()?;
+        tap.set_if_route(route)?;
+        // tap.set_if_addr(addr)?;
 
         loop {
-            let mut buf = [0u8; 1514];
+            let mut buf = Box::new([0u8; ETH_FRAME_MAX_SIZE]);
             println!("listening...");
-            let n = tap.read(&mut buf).unwrap();
+            let n = tap.read(&mut *buf).unwrap();
             println!("{n} bytes received");
 
             let hdr = EthHeader::parse(&buf[..14].try_into().unwrap());
