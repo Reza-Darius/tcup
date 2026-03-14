@@ -1,11 +1,11 @@
+use bytemuck::{Pod, Zeroable};
 use tracing::info;
 
 use crate::arp::handle_arp;
 
 use crate::error::Result;
 use crate::tap::TAPDevice;
-use crate::types::MockHost;
-use std::mem;
+use crate::types::{MAC, MockHost};
 
 use crate::utils::mac_to_str;
 
@@ -40,23 +40,36 @@ pub struct EthFrame {
 }
 
 impl EthFrame {
+    pub fn new(dmac: MAC, smac: MAC, eth_type: u16, payload: &[u8]) -> Self {
+        EthFrame {
+            hdr: EthHeader {
+                dmac: dmac.octets(),
+                smac: smac.octets(),
+                prot_type: eth_type,
+            },
+            payload: Box::from(payload),
+        }
+    }
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        if data.len() < ETH_FRAME_MIN_SIZE {
+        if data.len() < ETH_HDR_SIZE {
             return Err(format!("Error: frame is too small, len: {}", data.len()).into());
         };
 
         Ok(EthFrame {
-            hdr: EthHeader::parse(&data[..14].try_into().expect("we checked the length")),
+            hdr: EthHeader::from_bytes(&data[..14].try_into().expect("we checked the length")),
             payload: Box::from(&data[14..]),
         })
     }
 
-    // pub fn into_bytes(self) -> Vec<u8> {
-    //     let size = ETH_HDR_SIZE + self.payload.len();
-    //     let mut data = Vec::with_capacity(size);
-    //     data[..ETH_HDR_SIZE].copy_from_slice(&self);
-    //     data
-    // }
+    pub fn into_bytes(self) -> Vec<u8> {
+        let size = ETH_HDR_SIZE + self.payload.len();
+        let mut data = Vec::with_capacity(size);
+
+        data.extend_from_slice(&self.hdr.into_bytes());
+        data.extend_from_slice(&self.payload);
+
+        data
+    }
 }
 
 impl std::fmt::Display for EthFrame {
@@ -65,7 +78,7 @@ impl std::fmt::Display for EthFrame {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Pod, Zeroable, Clone, Copy)]
 #[repr(C, packed)]
 pub struct EthHeader {
     dmac: [u8; MAC_ADDR_LEN], // dest MAC address
@@ -93,10 +106,15 @@ impl std::fmt::Display for EthHeader {
 }
 
 impl EthHeader {
-    pub fn parse(buf: &[u8; ETH_HDR_SIZE]) -> Self {
-        let mut hdr: EthHeader = unsafe { mem::transmute_copy(buf) };
+    pub fn from_bytes(buf: &[u8; ETH_HDR_SIZE]) -> Self {
+        let mut hdr: EthHeader = bytemuck::cast(*buf);
         hdr.prot_type = u16::from_be(hdr.prot_type);
         hdr
+    }
+
+    pub fn into_bytes(mut self) -> [u8; ETH_HDR_SIZE] {
+        self.prot_type = u16::to_be(self.prot_type);
+        bytemuck::cast(self)
     }
 }
 
@@ -110,25 +128,36 @@ pub fn handle_frame(frame: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Re
         }
         ETH_P_ARP => {
             if let Some(arp_packet) = handle_arp(&frame.payload, host) {
-                let mut eth_frame = Vec::new();
+                // let mut eth_frame = Vec::new();
 
-                // header
-                eth_frame.extend_from_slice(&arp_packet.payload.dmac);
-                eth_frame.extend_from_slice(&host.mac.octets());
-                eth_frame.extend_from_slice(&u16::to_be_bytes(ETH_P_ARP));
-                // payload
-                eth_frame.extend_from_slice(&arp_packet.into_bytes());
+                // // header
+                // eth_frame.extend_from_slice(&arp_packet.payload.dmac);
+                // eth_frame.extend_from_slice(&host.mac.octets());
+                // eth_frame.extend_from_slice(&u16::to_be_bytes(ETH_P_ARP));
+                // // payload
+                // eth_frame.extend_from_slice(&arp_packet.into_bytes());
 
-                if eth_frame.len() > ETH_FRAME_MAX_SIZE {
-                    return Err("ethernet frame exceeded size".into());
-                }
+                // if eth_frame.len() > ETH_FRAME_MAX_SIZE {
+                //     return Err("ethernet frame exceeded size".into());
+                // }
 
-                tap.write(&eth_frame)?;
+                // let frame = EthFrame::from_bytes(&eth_frame)?;
+                //
+                let frame = EthFrame::new(
+                    arp_packet.payload.dmac.into(),
+                    host.mac,
+                    ETH_P_ARP,
+                    &arp_packet.into_bytes(),
+                );
+                println!("reply frame:\n{frame}\n");
+                let n = tap.write(frame)?;
+                println!("{n} bytes written");
             }
         }
         ETH_P_IPV6 => (),
         _ => return Err("unsupported frame type".into()),
     };
+
     Ok(())
 }
 

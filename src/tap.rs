@@ -1,6 +1,6 @@
 #![allow(dead_code, unused_variables, unused_assignments)]
 
-use crate::error::Result;
+use crate::{error::Result, eth::EthFrame};
 use std::{ffi::c_void, os::fd::OwnedFd, process::Command};
 
 use rustix::{
@@ -27,8 +27,8 @@ impl TAPDevice {
         tap_alloc(name)
     }
 
-    pub fn write(&self, data: &[u8]) -> rustix::io::Result<usize> {
-        rustix::io::write(&self.fd, data)
+    pub fn write(&self, data: EthFrame) -> rustix::io::Result<usize> {
+        rustix::io::write(&self.fd, &data.into_bytes())
     }
 
     pub fn read(&self, buf: &mut [u8]) -> rustix::io::Result<usize> {
@@ -64,7 +64,7 @@ impl TAPDevice {
     }
 
     pub fn set_if_addr(&self, addr: &str) -> Result<()> {
-        println!("ip addr add dev {} local {addr}", &self.name);
+        println!("ip addr add {} dev {} ", addr, &self.name);
         let cmd = Command::new("ip")
             .args(["addr", "add", "dev", &self.name, "local", addr])
             .output()
@@ -181,7 +181,7 @@ mod tests {
             let n = tap.read(&mut *buf).unwrap();
             println!("{n} bytes received");
 
-            let hdr = EthHeader::parse(&buf[..14].try_into().unwrap());
+            let hdr = EthHeader::from_bytes(&buf[..14].try_into().unwrap());
             println!("{hdr}");
         }
     }

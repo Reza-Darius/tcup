@@ -19,13 +19,15 @@ mod utils;
 
 fn main() -> Result<()> {
     let name = "tap0";
+    let addr = "10.0.0.1/24";
     let route = "10.0.0.0/24";
 
     setup_cap()?;
 
     let tap = TAPDevice::new(name)?;
     tap.set_if_link()?;
-    tap.set_if_route(route)?;
+    tap.set_if_addr(addr)?;
+    // tap.set_if_route(route)?;
 
     let mut dummy_host = MockHost::new(
         Ipv4Addr::new(10, 0, 0, 4),
@@ -40,7 +42,10 @@ fn main() -> Result<()> {
         let n = tap.read(&mut *buf).unwrap();
         println!("{n} bytes received");
 
-        let frame = EthFrame::from_bytes(buf.as_slice())?;
-        handle_frame(frame, &tap, &mut dummy_host)?;
+        let frame = EthFrame::from_bytes(&buf[..n])?;
+
+        if let Err(e) = handle_frame(frame, &tap, &mut dummy_host) {
+            println!("{e}");
+        };
     }
 }

@@ -5,6 +5,7 @@ use crate::{
     types::{MAC, MockHost},
     utils::mac_to_str,
 };
+use bytemuck::{Pod, Zeroable};
 use tracing::info;
 
 use crate::eth::{ETH_P_IP, ETH_P_IPV6};
@@ -18,7 +19,7 @@ const ARPHRD_ETHER: u16 = 1;
 
 const ARP_PACKET_SIZE: usize = 28;
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Pod, Zeroable)]
 #[repr(C, packed)]
 pub struct ArpPacket {
     pub header: ArpHeader,
@@ -26,10 +27,8 @@ pub struct ArpPacket {
 }
 
 impl ArpPacket {
-    fn parse(data: &[u8; ARP_PACKET_SIZE]) -> Self {
-        assert_eq!(size_of::<ArpPacket>(), ARP_PACKET_SIZE * size_of::<u8>());
-
-        let mut arp_packet: ArpPacket = unsafe { std::mem::transmute_copy(data) };
+    pub fn from_bytes(data: &[u8; ARP_PACKET_SIZE]) -> Self {
+        let mut arp_packet: ArpPacket = bytemuck::cast(*data);
 
         arp_packet.header.hwtype = u16::from_be(arp_packet.header.hwtype);
         arp_packet.header.prot_type = u16::from_be(arp_packet.header.prot_type);
@@ -38,22 +37,26 @@ impl ArpPacket {
         arp_packet
     }
 
-    pub fn into_bytes(self) -> [u8; ARP_PACKET_SIZE] {
-        let mut packet = [0u8; ARP_PACKET_SIZE];
+    pub fn into_bytes(mut self) -> [u8; ARP_PACKET_SIZE] {
+        self.header.hwtype = u16::to_be(self.header.hwtype);
+        self.header.prot_type = u16::to_be(self.header.prot_type);
+        self.header.opcode = u16::to_be(self.header.opcode);
+        bytemuck::cast(self)
+        // let mut packet = [0u8; ARP_PACKET_SIZE];
 
-        packet[..2].copy_from_slice(&self.header.hwsize.to_be_bytes());
-        packet[2..4].copy_from_slice(&self.header.prot_type.to_be_bytes());
-        packet[4] = self.header.hwsize;
-        packet[5] = self.header.prosize;
-        packet[6..8].copy_from_slice(&self.header.opcode.to_be_bytes());
+        // packet[..2].copy_from_slice(&self.header.hwsize.to_be_bytes());
+        // packet[2..4].copy_from_slice(&self.header.prot_type.to_be_bytes());
+        // packet[4] = self.header.hwsize;
+        // packet[5] = self.header.prosize;
+        // packet[6..8].copy_from_slice(&self.header.opcode.to_be_bytes());
 
-        packet[8..14].copy_from_slice(&self.payload.smac);
-        packet[14..18].copy_from_slice(&self.payload.sip);
+        // packet[8..14].copy_from_slice(&self.payload.smac);
+        // packet[14..18].copy_from_slice(&self.payload.sip);
 
-        packet[18..24].copy_from_slice(&self.payload.dmac);
-        packet[24..28].copy_from_slice(&self.payload.dip);
+        // packet[18..24].copy_from_slice(&self.payload.dmac);
+        // packet[24..28].copy_from_slice(&self.payload.dip);
 
-        packet
+        // packet
     }
 }
 
@@ -63,7 +66,7 @@ impl Display for ArpPacket {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Pod, Zeroable)]
 #[repr(C, packed)]
 pub struct ArpHeader {
     pub hwtype: u16,    // (ar$hrd) Hardware address space
@@ -91,18 +94,11 @@ impl Display for ArpHeader {
             ARPOP_REQUEST => "Request",
             _ => unreachable!(),
         };
-        write!(
-            f,
-            "
-            hw type: {hw_type}\n
-            protocol: {protocol}\n
-            op: {op}\n
-        "
-        )
+        write!(f, "hw type: {hw_type}\nprotocol: {protocol}\nop: {op}\n")
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Pod, Zeroable)]
 #[repr(C, packed)]
 pub struct ArpIpv4 {
     pub smac: [u8; 6], // (ar$sha) Hardware address of sender
@@ -116,12 +112,7 @@ impl Display for ArpIpv4 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "
-            source mac: {}\n
-            source ip: {}\n
-            target mac: {}\n
-            target ip: {}\n
-        ",
+            "source mac: {}\nsource ip: {}\ntarget mac: {}\ntarget ip: {}\n",
             mac_to_str(&self.smac),
             Ipv4Addr::from_octets(self.sip),
             mac_to_str(&self.dmac),
@@ -131,7 +122,8 @@ impl Display for ArpIpv4 {
 }
 
 pub fn handle_arp(frame_payload: &[u8], host: &mut MockHost) -> Option<ArpPacket> {
-    let mut arp_packet = ArpPacket::parse(frame_payload[..ARP_PACKET_SIZE].try_into().unwrap());
+    let mut arp_packet =
+        ArpPacket::from_bytes(frame_payload[..ARP_PACKET_SIZE].try_into().unwrap());
 
     let sender_mac = MAC::from_octets(arp_packet.payload.smac);
     let sender_ip = Ipv4Addr::from_octets(arp_packet.payload.sip);
@@ -139,6 +131,7 @@ pub fn handle_arp(frame_payload: &[u8], host: &mut MockHost) -> Option<ArpPacket
     let target_mac = MAC::from_octets(arp_packet.payload.dmac);
     let target_ip = Ipv4Addr::from_octets(arp_packet.payload.dip);
 
+    println!("handling arp\n{}\n", &arp_packet);
     info!("parsing ARP packet:\n{}", &arp_packet);
 
     let header = &arp_packet.header;
@@ -187,6 +180,7 @@ pub fn handle_arp(frame_payload: &[u8], host: &mut MockHost) -> Option<ArpPacket
 
         arp_packet.header.opcode = ARPOP_REPLY;
 
+        println!("sending arp:\n{}\n", &arp_packet);
         return Some(arp_packet);
     }
     None

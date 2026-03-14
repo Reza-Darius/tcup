@@ -30,8 +30,8 @@ impl MAC {
         self.0
     }
 
-    pub fn from_octets(mac: [u8; 6]) -> Self {
-        MAC(mac)
+    pub fn from_octets(octets: [u8; 6]) -> Self {
+        MAC(octets)
     }
 
     pub fn from_str(mac: &str) -> Result<Self> {
@@ -50,6 +50,12 @@ impl MAC {
         }
 
         Ok(MAC(mac_parsed))
+    }
+}
+
+impl From<[u8; 6]> for MAC {
+    fn from(value: [u8; 6]) -> Self {
+        MAC::from_octets(value)
     }
 }
 
