@@ -1,12 +1,11 @@
 use bytemuck::{Pod, Zeroable};
-use tracing::info;
+use tracing::instrument;
 
 use crate::arp::handle_arp;
-
 use crate::error::Result;
+use crate::ip::handle_ip_frame;
 use crate::tap::TAPDevice;
 use crate::types::{MAC, MockHost};
-
 use crate::utils::mac_to_str;
 
 /*
@@ -50,6 +49,7 @@ impl EthFrame {
             payload: Box::from(payload),
         }
     }
+
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < ETH_HDR_SIZE {
             return Err(format!("Error: frame is too small, len: {}", data.len()).into());
@@ -118,6 +118,7 @@ impl EthHeader {
     }
 }
 
+#[instrument(skip_all)]
 pub fn handle_frame(frame: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Result<()> {
     println!("{}", frame.hdr);
 
@@ -128,28 +129,15 @@ pub fn handle_frame(frame: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Re
         }
         ETH_P_ARP => {
             if let Some(arp_packet) = handle_arp(&frame.payload, host) {
-                // let mut eth_frame = Vec::new();
-
-                // // header
-                // eth_frame.extend_from_slice(&arp_packet.payload.dmac);
-                // eth_frame.extend_from_slice(&host.mac.octets());
-                // eth_frame.extend_from_slice(&u16::to_be_bytes(ETH_P_ARP));
-                // // payload
-                // eth_frame.extend_from_slice(&arp_packet.into_bytes());
-
-                // if eth_frame.len() > ETH_FRAME_MAX_SIZE {
-                //     return Err("ethernet frame exceeded size".into());
-                // }
-
-                // let frame = EthFrame::from_bytes(&eth_frame)?;
-                //
                 let frame = EthFrame::new(
-                    arp_packet.payload.dmac.into(),
+                    arp_packet.dmac.into(),
                     host.mac,
                     ETH_P_ARP,
                     &arp_packet.into_bytes(),
                 );
+
                 println!("reply frame:\n{frame}\n");
+
                 let n = tap.write(frame)?;
                 println!("{n} bytes written");
             }
@@ -158,9 +146,5 @@ pub fn handle_frame(frame: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Re
         _ => return Err("unsupported frame type".into()),
     };
 
-    Ok(())
-}
-
-fn handle_ip_frame(frame_payload: &[u8]) -> Result<()> {
     Ok(())
 }

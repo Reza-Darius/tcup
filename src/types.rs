@@ -1,4 +1,7 @@
+use std::cmp::Ordering;
 use std::{collections::HashMap, net::Ipv4Addr};
+
+use bytemuck::{Pod, Zeroable};
 
 use crate::error::Result;
 use crate::tap::TAPDevice;

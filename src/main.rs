@@ -2,6 +2,8 @@
 
 use std::net::Ipv4Addr;
 
+use tracing::info;
+
 use crate::{
     error::Result,
     eth::{ETH_FRAME_MAX_SIZE, EthFrame, handle_frame},
@@ -13,11 +15,14 @@ use crate::{
 mod arp;
 mod error;
 mod eth;
+mod ip;
 mod tap;
 mod types;
 mod utils;
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt().with_target(false).init();
+
     let name = "tap0";
     let addr = "10.0.0.1/24";
     let route = "10.0.0.0/24";
@@ -40,7 +45,7 @@ fn main() -> Result<()> {
         println!("listening...");
 
         let n = tap.read(&mut *buf).unwrap();
-        println!("{n} bytes received");
+        info!("{n} bytes received");
 
         let frame = EthFrame::from_bytes(&buf[..n])?;
 

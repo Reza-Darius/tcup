@@ -29,3 +29,25 @@ pub fn mac_to_str(buf: &[u8; 6]) -> String {
         buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]
     )
 }
+
+/// assumes network order bytes
+pub fn calc_checksum(bytes: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+
+    while i + 1 < bytes.len() {
+        let word = u16::from_be_bytes([bytes[i], bytes[i + 1]]);
+        sum += word as u32;
+        i += 2;
+    }
+
+    if i < bytes.len() {
+        sum += (bytes[i] as u32) << 8;
+    }
+
+    while (sum >> 16) > 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    !(sum as u16)
+}
