@@ -1,4 +1,4 @@
-#![allow(dead_code, unused_variables, unused_assignments)]
+#![allow(dead_code, unused_variables, unused_assignments, non_camel_case_types)]
 
 use std::net::Ipv4Addr;
 
@@ -15,8 +15,10 @@ use crate::{
 mod arp;
 mod error;
 mod eth;
+mod icmp;
 mod ip;
 mod tap;
+mod tcp;
 mod types;
 mod utils;
 
@@ -47,10 +49,8 @@ fn main() -> Result<()> {
         let n = tap.read(&mut *buf).unwrap();
         info!("{n} bytes received");
 
-        let frame = EthFrame::from_bytes(&buf[..n])?;
+        let frame = EthFrame::new(&buf[..n])?;
 
-        if let Err(e) = handle_frame(frame, &tap, &mut dummy_host) {
-            println!("{e}");
-        };
+        let _ = handle_frame(frame, &tap, &mut dummy_host);
     }
 }

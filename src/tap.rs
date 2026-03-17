@@ -28,7 +28,7 @@ impl TAPDevice {
     }
 
     pub fn write(&self, data: EthFrame) -> rustix::io::Result<usize> {
-        rustix::io::write(&self.fd, &data.into_bytes())
+        rustix::io::write(&self.fd, data.as_bytes())
     }
 
     pub fn read(&self, buf: &mut [u8]) -> rustix::io::Result<usize> {
@@ -142,7 +142,7 @@ fn tap_alloc(name: &str) -> Result<TAPDevice> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        eth::{ETH_FRAME_MAX_SIZE, EthHeader},
+        eth::{ETH_FRAME_MAX_SIZE, Eth_hdr},
         utils::setup_cap,
     };
 
@@ -181,7 +181,7 @@ mod tests {
             let n = tap.read(&mut *buf).unwrap();
             println!("{n} bytes received");
 
-            let hdr = EthHeader::from_bytes(&buf[..14].try_into().unwrap());
+            let hdr = Eth_hdr::from_be_bytes(&buf[..14].try_into().unwrap());
             println!("{hdr}");
         }
     }

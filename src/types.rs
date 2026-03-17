@@ -1,7 +1,4 @@
-use std::cmp::Ordering;
 use std::{collections::HashMap, net::Ipv4Addr};
-
-use bytemuck::{Pod, Zeroable};
 
 use crate::error::Result;
 use crate::tap::TAPDevice;
@@ -64,7 +61,7 @@ impl From<[u8; 6]> for MAC {
 
 #[derive(Debug)]
 pub struct MockHost {
-    pub table: HashMap<Ipv4Addr, MAC>,
+    pub arp_table: HashMap<Ipv4Addr, MAC>,
     pub addr: Ipv4Addr,
     pub mac: MAC,
 }
@@ -72,9 +69,13 @@ pub struct MockHost {
 impl MockHost {
     pub fn new(ip: Ipv4Addr, mac: MAC) -> Self {
         MockHost {
-            table: HashMap::new(),
+            arp_table: HashMap::new(),
             addr: ip,
             mac,
         }
+    }
+
+    pub fn get_mac(&self, ip: impl Into<Ipv4Addr>) -> Option<MAC> {
+        self.arp_table.get(&ip.into()).copied()
     }
 }

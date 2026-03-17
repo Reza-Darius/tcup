@@ -2,6 +2,9 @@ use std::fmt::Display;
 use std::net::Ipv4Addr;
 
 use crate::{
+    error::Result,
+    eth::{ETH_P_ARP, Eth_hdr, EthFrame},
+    tap::TAPDevice,
     types::{MAC, MockHost},
     utils::mac_to_str,
 };
@@ -36,7 +39,8 @@ pub struct ArpPacket {
 }
 
 impl ArpPacket {
-    pub fn from_bytes(data: &[u8; ARP_PACKET_SIZE]) -> Self {
+    /// from network order bytes
+    pub fn from_be_bytes(data: &[u8; ARP_PACKET_SIZE]) -> Self {
         let mut arp_packet: ArpPacket = bytemuck::cast(*data);
 
         arp_packet.hwtype = u16::from_be(arp_packet.hwtype);
@@ -46,77 +50,14 @@ impl ArpPacket {
         arp_packet
     }
 
-    pub fn into_bytes(mut self) -> [u8; ARP_PACKET_SIZE] {
+    /// converts into network order bytes
+    pub fn into_be_bytes(mut self) -> [u8; ARP_PACKET_SIZE] {
         self.hwtype = u16::to_be(self.hwtype);
         self.prot_type = u16::to_be(self.prot_type);
         self.opcode = u16::to_be(self.opcode);
 
         bytemuck::cast(self)
     }
-}
-
-/// in case the ARP request was directed at us, it returns an appropiate response packet
-pub fn handle_arp(frame_payload: &[u8], host: &mut MockHost) -> Option<ArpPacket> {
-    let mut arp_packet =
-        ArpPacket::from_bytes(frame_payload[..ARP_PACKET_SIZE].try_into().unwrap());
-
-    let sender_mac = MAC::from_octets(arp_packet.smac);
-    let sender_ip = Ipv4Addr::from_octets(arp_packet.sip);
-
-    let target_mac = MAC::from_octets(arp_packet.dmac);
-    let target_ip = Ipv4Addr::from_octets(arp_packet.dip);
-
-    info!("handling arp\n");
-    println!("{}\n", &arp_packet);
-
-    if arp_packet.hwtype != ARP_HRD_ETHER {
-        return None;
-    }
-
-    if arp_packet.prot_type != ETH_P_IP {
-        return None;
-    }
-
-    let mut merge_flag = false;
-
-    // do we have an entry for the sender ip address?
-    //      if yes, update ip address with sender mac
-    //          set merge_flag = true
-    if host.table.insert(sender_ip, sender_mac).is_some() {
-        merge_flag = true;
-    }
-
-    // am i the target of the ip address?
-    if target_ip != host.addr {
-        return None;
-    }
-
-    // if merge_flag = false add sender ip address with sender mac to table
-    if !merge_flag {
-        host.table.insert(sender_ip, sender_mac);
-    }
-
-    if arp_packet.opcode == ARPOP_REPLY {
-        return None;
-    }
-
-    // if opcode == request
-    //     put my prot address and hw addres in the sender fields
-    //     set opcode to reply
-    //             send the packet away
-    if arp_packet.opcode == ARPOP_REQUEST {
-        arp_packet.smac = host.mac.octets();
-        arp_packet.sip = host.addr.octets();
-
-        arp_packet.dmac = sender_mac.octets();
-        arp_packet.dip = sender_ip.octets();
-
-        arp_packet.opcode = ARPOP_REPLY;
-
-        println!("sending arp:\n{}\n", &arp_packet);
-        return Some(arp_packet);
-    }
-    None
 }
 
 impl Display for ArpPacket {
@@ -148,4 +89,91 @@ impl Display for ArpPacket {
             Ipv4Addr::from_octets(self.dip),
         )
     }
+}
+
+/// in case the ARP request was directed at us, it returns an appropiate response packet
+pub fn handle_arp(mut frame: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Result<()> {
+    info!("handling ARP\n");
+    // let arp_packet = ArpPacket::from_bytes(data.payload[..ARP_PACKET_SIZE].try_into()?);
+
+    let arp_packet = ArpPacket::from_be_bytes(frame.get_eth_pay()[..ARP_PACKET_SIZE].try_into()?);
+    println!("{}\n", &arp_packet);
+
+    if let Some(arp_packet) = run_arp_check(arp_packet, host) {
+        // TODO: reuse allocation
+        let hdr = Eth_hdr::new(arp_packet.dmac.into(), host.mac, ETH_P_ARP);
+
+        frame.set_eth_hdr(hdr);
+        frame.set_eth_pay(&arp_packet.into_be_bytes())?;
+
+        // let frame = EthFrame::new(
+        //     arp_packet.dmac.into(),
+        //     host.mac,
+        //     ETH_P_ARP,
+        //     &arp_packet.into_bytes(),
+        // );
+
+        println!("reply frame:\n{}\n", frame.get_eth_hdr());
+
+        let n = tap.write(frame)?;
+        println!("{n} bytes written");
+    }
+    Ok(())
+}
+
+fn run_arp_check(mut arp: ArpPacket, host: &mut MockHost) -> Option<ArpPacket> {
+    let sender_mac = MAC::from_octets(arp.smac);
+    let sender_ip = Ipv4Addr::from_octets(arp.sip);
+
+    let target_mac = MAC::from_octets(arp.dmac);
+    let target_ip = Ipv4Addr::from_octets(arp.dip);
+
+    if arp.hwtype != ARP_HRD_ETHER {
+        return None;
+    }
+
+    if arp.prot_type != ETH_P_IP {
+        return None;
+    }
+
+    let mut merge_flag = false;
+
+    // do we have an entry for the sender ip address?
+    //      if yes, update ip address with sender mac
+    //          set merge_flag = true
+    if host.arp_table.insert(sender_ip, sender_mac).is_some() {
+        merge_flag = true;
+    }
+
+    // am i the target of the ip address?
+    if target_ip != host.addr {
+        return None;
+    }
+
+    // if merge_flag = false add sender ip address with sender mac to table
+    if !merge_flag {
+        host.arp_table.insert(sender_ip, sender_mac);
+    }
+
+    if arp.opcode == ARPOP_REPLY {
+        return None;
+    }
+
+    // if opcode == request
+    //     put my prot address and hw addres in the sender fields
+    //     set opcode to reply
+    //             send the packet away
+    if arp.opcode == ARPOP_REQUEST {
+        arp.smac = host.mac.octets();
+        arp.sip = host.addr.octets();
+
+        arp.dmac = sender_mac.octets();
+        arp.dip = sender_ip.octets();
+
+        arp.opcode = ARPOP_REPLY;
+
+        println!("sending arp:\n{}\n", &arp);
+        return Some(arp);
+    }
+    None
 }
