@@ -119,7 +119,11 @@ fn tap_alloc(name: &str) -> Result<TAPDevice> {
         return Err("name is too large".into());
     };
 
-    let fd = rustix::fs::open("/dev/net/tun", OFlags::RDWR, Mode::empty())?;
+    let fd = rustix::fs::open(
+        "/dev/net/tun",
+        OFlags::RDWR | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?;
 
     let mut ifreq = Ifreq {
         ifrname: [0; _],
@@ -177,7 +181,9 @@ mod tests {
 
         loop {
             let mut buf = Box::new([0u8; ETH_FRAME_MAX_SIZE]);
+
             println!("listening...");
+
             let n = tap.read(&mut *buf).unwrap();
             println!("{n} bytes received");
 
