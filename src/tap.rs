@@ -7,6 +7,7 @@ use rustix::{
     fs::{Mode, OFlags},
     ioctl::Ioctl,
 };
+use tokio::io::unix::AsyncFd;
 
 const IFF_TAP: i16 = 0x2;
 const IFF_NO_PI: i16 = 0x1000;
@@ -19,20 +20,63 @@ const IFNAMSIZ: usize = 16; // including null terminator
 #[derive(Debug)]
 pub struct TAPDevice {
     name: String,
-    fd: OwnedFd,
+    fd: AsyncFd<OwnedFd>,
 }
 
 impl TAPDevice {
     pub fn new(name: &str) -> Result<Self> {
-        tap_alloc(name)
+        if name.len() > IFNAMSIZ - 1 {
+            return Err("name is too large".into());
+        };
+
+        let fd = rustix::fs::open(
+            "/dev/net/tun",
+            OFlags::RDWR | OFlags::NONBLOCK,
+            Mode::empty(),
+        )?;
+
+        let mut ifreq = Ifreq {
+            ifrname: [0; _],
+            ifreqdata: Ifreqdata {
+                ifrflags: IFF_TAP | IFF_NO_PI,
+            },
+        };
+
+        ifreq.ifrname[..name.len()].copy_from_slice(name.as_bytes());
+        assert_eq!(ifreq.ifrname[name.len()], 0);
+
+        unsafe { rustix
+                ::ioctl::ioctl(&fd, &mut ifreq)? };
+
+
+        Ok(TAPDevice {
+            name: name.to_string(),
+            fd: AsyncFd::new(fd)?,
+        })
     }
 
-    pub fn write(&self, data: EthFrame) -> rustix::io::Result<usize> {
-        rustix::io::write(&self.fd, data.as_bytes())
+    pub async fn write(&self, data: EthFrame) -> Result<usize> {
+        loop {
+            let mut guard = self.fd.writable().await?;
+
+            match guard.try_io(|inner| {
+                rustix::io::write(inner.get_ref(), data.as_bytes()).map_err(Into::into)
+            }) {
+                Ok(res) => return Ok(res?),
+                Err(_would_block) => continue,
+            }
+        }
     }
 
-    pub fn read(&self, buf: &mut [u8]) -> rustix::io::Result<usize> {
-        rustix::io::read(&self.fd, buf)
+    pub async fn read(&self, buf: &mut [u8]) -> Result<usize> {
+        loop {
+            let mut guard = self.fd.readable().await?;
+
+            match guard.try_io(|inner| rustix::io::read(inner.get_ref(), &mut *buf).map_err(Into::into)) {
+                Ok(res) => return Ok(res?),
+                Err(_would_block) => continue,
+            }
+        }
     }
 
     pub fn set_if_link(&self) -> Result<()> {
@@ -114,35 +158,6 @@ union Ifreqdata {
     data: [u8; IFRQ_UNION_SIZE],
 }
 
-fn tap_alloc(name: &str) -> Result<TAPDevice> {
-    if name.len() > IFNAMSIZ - 1 {
-        return Err("name is too large".into());
-    };
-
-    let fd = rustix::fs::open(
-        "/dev/net/tun",
-        OFlags::RDWR | OFlags::NONBLOCK,
-        Mode::empty(),
-    )?;
-
-    let mut ifreq = Ifreq {
-        ifrname: [0; _],
-        ifreqdata: Ifreqdata {
-            ifrflags: IFF_TAP | IFF_NO_PI,
-        },
-    };
-
-    ifreq.ifrname[..name.len()].copy_from_slice(name.as_bytes());
-    assert_eq!(ifreq.ifrname[name.len()], 0);
-
-    unsafe { rustix::ioctl::ioctl(&fd, &mut ifreq)? };
-
-    Ok(TAPDevice {
-        name: name.to_string(),
-        fd,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -153,42 +168,31 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    #[test]
-    fn calling_tun() {
-        let name = "tcup_server";
-        let res = tap_alloc(name).unwrap();
 
-        let cmd = Command::new("ip")
-            .arg("link")
-            .output()
-            .expect("failed to execute command");
-        let output = String::from_utf8(cmd.stdout).unwrap();
-        assert!(output.contains(name))
-    }
 
-    #[test]
-    fn tap_ip() -> Result<()> {
-        let name = "tap0";
-        let route = "10.0.0.0/24";
-        let addr = "10.0.0.5/24";
+    // #[test]
+    // fn tap_ip() -> Result<()> {
+    //     let name = "tap0";
+    //     let route = "10.0.0.0/24";
+    //     let addr = "10.0.0.5/24";
 
-        setup_cap().unwrap();
+    //     setup_cap().unwrap();
 
-        let tap = TAPDevice::new(name)?;
-        tap.set_if_link()?;
-        tap.set_if_route(route)?;
-        // tap.set_if_addr(addr)?;
+    //     let tap = TAPDevice::new(name)?;
+    //     tap.set_if_link()?;
+    //     tap.set_if_route(route)?;
+    //     // tap.set_if_addr(addr)?;
 
-        loop {
-            let mut buf = Box::new([0u8; ETH_FRAME_MAX_SIZE]);
+    //     loop {
+    //         let mut buf = Box::new([0u8; ETH_FRAME_MAX_SIZE]);
 
-            println!("listening...");
+    //         println!("listening...");
 
-            let n = tap.read(&mut *buf).unwrap();
-            println!("{n} bytes received");
+    //         let n = tap.read(&mut *buf).await.unwrap();
+    //         println!("{n} bytes received");
 
-            let hdr = Eth_hdr::from_be_bytes(&buf[..14].try_into().unwrap());
-            println!("{hdr}");
-        }
-    }
+    //         let hdr = Eth_hdr::from_be_bytes(&buf[..14].try_into().unwrap());
+    //         println!("{hdr}");
+    //     }
+    // }
 }

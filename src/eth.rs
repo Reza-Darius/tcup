@@ -1,12 +1,14 @@
+use std::sync::Arc;
+
 use bytemuck::{Pod, Zeroable};
 use tracing::instrument;
 
 use crate::arp::handle_arp;
 use crate::error::Result;
-use crate::ip::{IP_HDR_MINSIZE, IP_hdr, handle_ip_frame};
+use crate::ip::{IP_HDR_MAXSIZE, IP_HDR_MINSIZE, IP_hdr, handle_ip_frame};
 use crate::tap::TAPDevice;
-use crate::tcp::TCP_HDR_MINSIZE;
-use crate::types::{MAC, MockHost};
+use crate::tcp::{TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_hdr};
+use crate::types::{MAC, MockHost, TCup};
 use crate::utils::mac_to_str;
 
 /*
@@ -124,6 +126,12 @@ impl EthFrame {
             return Err("data too small to write IP hdr".into());
         }
 
+        if hdr.len() > IP_HDR_MINSIZE {
+            self.ip_hdr_offset = (hdr.len() - IP_HDR_MINSIZE) as u8;
+        }
+
+        assert!(hdr.len() < IP_HDR_MAXSIZE);
+
         self.data.as_mut_slice()[IP_HDR_OFFSET..IP_HDR_OFFSET + IP_HDR_MINSIZE]
             .copy_from_slice(&hdr.into_be_bytes());
 
@@ -154,6 +162,36 @@ impl EthFrame {
         self.data
             .truncate(IP_PAY_OFFSET + self.ip_hdr_offset as usize);
         self.data.extend_from_slice(data);
+
+        Ok(())
+    }
+
+    pub fn get_tcp_hdr(&self) -> Result<TCP_hdr> {
+        let start = TCP_HDR_OFFSET + self.ip_hdr_offset as usize;
+        let end = TCP_HDR_OFFSET + TCP_HDR_MINSIZE + self.ip_hdr_offset as usize;
+
+        if self.data.len() < end {
+            return Err("not enough data to retrieve TCP header".into());
+        }
+
+        Ok(TCP_hdr::from_be_bytes(self.data[start..end].try_into()?))
+    }
+
+    pub fn set_tcp_hdr(&mut self, hdr: TCP_hdr) -> Result<()> {
+        let start = TCP_HDR_OFFSET + self.ip_hdr_offset as usize;
+        let end = TCP_HDR_OFFSET + TCP_HDR_MINSIZE + self.ip_hdr_offset as usize;
+
+        if self.data.len() < end {
+            return Err("frame data too small to write TCP header".into());
+        }
+
+        if hdr.len() > TCP_HDR_MINSIZE {
+            self.ip_hdr_offset = (hdr.len() - TCP_HDR_MINSIZE) as u8;
+        }
+
+        assert!(hdr.len() < TCP_HDR_MAXSIZE);
+
+        self.data.as_mut_slice()[start..end].copy_from_slice(&hdr.into_be_bytes());
 
         Ok(())
     }
@@ -209,18 +247,18 @@ impl Eth_hdr {
 }
 
 #[instrument(skip_all, err)]
-pub fn handle_frame(frame: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Result<()> {
-    let hdr = frame.get_eth_hdr();
+pub async fn handle_frame(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
+    let hdr = inc.get_eth_hdr();
     println!("{}", hdr);
 
-    // TODO: discard frame if its not directed at us
+    // TODO: discard incoming frame if its not directed at us
 
     match hdr.prot_type {
         ETH_P_IP => {
-            handle_ip_frame(frame, tap, host)?;
+            handle_ip_frame(inc, tcup, host).await?;
         }
         ETH_P_ARP => {
-            handle_arp(frame, tap, host)?;
+            handle_arp(inc, tcup, host).await?;
         }
         ETH_P_IPV6 => (),
         _ => return Err("unsupported frame type".into()),

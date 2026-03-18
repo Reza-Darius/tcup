@@ -2,12 +2,15 @@
  * Internet Control Message Protocol (ICMP)
  */
 
+use std::sync::Arc;
+
 use bytemuck::{Pod, Zeroable};
 use tracing::info;
 
 use crate::error::Result;
 use crate::eth::{ETH_HDR_SIZE, ETH_P_IP, ETH_PAY_MAX_SIZE, Eth_hdr, EthFrame};
 use crate::ip::{IP_HDR_MINSIZE, IP_hdr, IPPROTO_ICMP, TOS_BEST_EFFORT, TTL_START};
+use crate::types::TCup;
 use crate::{tap::TAPDevice, types::MockHost, utils::calc_checksum_be};
 
 const TYPE_ECHO_REPLY: u8 = 0;
@@ -92,8 +95,8 @@ impl Unreachable {
     }
 }
 
-pub fn handle_icmp(data: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Result<()> {
-    let ip_payload = data.get_ip_pay()?;
+pub async fn handle_icmp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
+    let ip_payload = inc.get_ip_pay()?;
 
     if ip_payload.len() < ICMP_HDR_SIZE {
         return Err("payload size smaller than ICMP hdr size".into());
@@ -105,17 +108,17 @@ pub fn handle_icmp(data: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Resu
     }
 
     match ip_payload[0] {
-        TYPE_ECHO_REQ => handle_echo_req(data, tap, host),
+        TYPE_ECHO_REQ => handle_echo_req(inc, tcup, host).await,
         // TYPE_ECHO_REPLY => handle_echo_rep(packet, host)?,
         _ => unimplemented!(),
     }
 }
 
-fn handle_echo_req(data: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Result<()> {
+async fn handle_echo_req(req: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
     info!("handling echo request");
 
-    let req_ip_hdr = data.get_ip_hdr()?;
-    let req_ip_pay = data.get_ip_pay()?;
+    let req_ip_hdr = req.get_ip_hdr()?;
+    let req_ip_pay = req.get_ip_pay()?;
 
     let req_ip_len = req_ip_hdr.tot_len as usize;
 
@@ -180,7 +183,7 @@ fn handle_echo_req(data: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Resu
     println!("reply eth: {}\n", rep_eth_hdr);
     println!("reply ip: {}", rep_ip_hdr);
 
-    let n = tap.write(frame)?;
+    let n = tcup.write_tap(frame).await?;
     println!("{n} bytes written");
 
     Ok(())

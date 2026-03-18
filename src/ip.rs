@@ -1,12 +1,15 @@
-use std::{
-    net::Ipv4Addr,
-};
+use std::{net::Ipv4Addr, sync::Arc};
 
 use bytemuck::{Pod, Zeroable};
 use tracing::{error, info};
 
 use crate::{
-    error::Result, eth::EthFrame, icmp::handle_icmp, tap::TAPDevice, types::MockHost,
+    error::Result,
+    eth::EthFrame,
+    icmp::handle_icmp,
+    tap::TAPDevice,
+    tcp::handle_tcp,
+    types::{MockHost, TCup},
     utils::calc_checksum_be,
 };
 
@@ -140,8 +143,8 @@ impl std::fmt::Display for IP_hdr {
     }
 }
 
-pub fn handle_ip_frame(data: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Result<()> {
-    let eth_pay = data.get_eth_pay();
+pub async fn handle_ip_frame(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
+    let eth_pay = inc.get_eth_pay();
 
     let ip_hdr = check_ip_packet(eth_pay)?;
 
@@ -152,14 +155,8 @@ pub fn handle_ip_frame(data: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> 
     }
 
     match ip_hdr.prot {
-        IPPROTO_ICMP => {
-            handle_icmp(data, tap, host)?;
-            // TODO send packet
-
-            Ok(())
-        }
-        // IPPROTO_TCP => (),
-        // IPPROTO_UDP => (),
+        IPPROTO_ICMP => handle_icmp(inc, tcup, host).await,
+        IPPROTO_TCP => handle_tcp(inc, tcup, host).await,
         _ => Err("IP protocol not supported".into()),
     }
 }

@@ -4,11 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bitflags = { version = "2.11.0", features = ["bytemuck", "std"] }
 bytemuck = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
 caps = "0.5.6"
 libc = "0.2.183"
+parking_lot = "0.12.5"
 rustix = { version = "1.1.4", features = ["fs", "net"] }
 test-log = "0.2.19"
 thiserror = "2.0.18"
+tokio = { version = "1.50.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.22"

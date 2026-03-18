@@ -1,6 +1,9 @@
 use std::array::TryFromSliceError;
 
 use thiserror::Error;
+use tokio::sync::mpsc::error::SendError;
+
+use crate::eth::EthFrame;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -18,6 +21,10 @@ pub enum Error {
     Errno(#[from] rustix::io::Errno),
     #[error("{0}")]
     Conversion(#[from] TryFromSliceError),
+    #[error("{0}")]
+    Net(#[from] std::net::AddrParseError),
+    #[error("{0}")]
+    TxSend(#[from] SendError<EthFrame>),
 }
 
 impl From<&str> for Error {

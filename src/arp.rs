@@ -1,6 +1,7 @@
-use std::fmt::Display;
 use std::net::Ipv4Addr;
+use std::{fmt::Display, sync::Arc};
 
+use crate::types::TCup;
 use crate::{
     error::Result,
     eth::{ETH_P_ARP, Eth_hdr, EthFrame},
@@ -92,30 +93,21 @@ impl Display for ArpPacket {
 }
 
 /// in case the ARP request was directed at us, it returns an appropiate response packet
-pub fn handle_arp(mut frame: EthFrame, tap: &TAPDevice, host: &mut MockHost) -> Result<()> {
+pub async fn handle_arp(mut inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
     info!("handling ARP\n");
-    // let arp_packet = ArpPacket::from_bytes(data.payload[..ARP_PACKET_SIZE].try_into()?);
 
-    let arp_packet = ArpPacket::from_be_bytes(frame.get_eth_pay()[..ARP_PACKET_SIZE].try_into()?);
+    let arp_packet = ArpPacket::from_be_bytes(inc.get_eth_pay()[..ARP_PACKET_SIZE].try_into()?);
     println!("{}\n", &arp_packet);
 
     if let Some(arp_packet) = run_arp_check(arp_packet, host) {
-        // TODO: reuse allocation
         let hdr = Eth_hdr::new(arp_packet.dmac.into(), host.mac, ETH_P_ARP);
 
-        frame.set_eth_hdr(hdr);
-        frame.set_eth_pay(&arp_packet.into_be_bytes())?;
+        inc.set_eth_hdr(hdr);
+        inc.set_eth_pay(&arp_packet.into_be_bytes())?;
 
-        // let frame = EthFrame::new(
-        //     arp_packet.dmac.into(),
-        //     host.mac,
-        //     ETH_P_ARP,
-        //     &arp_packet.into_bytes(),
-        // );
+        println!("reply frame:\n{}\n", inc.get_eth_hdr());
 
-        println!("reply frame:\n{}\n", frame.get_eth_hdr());
-
-        let n = tap.write(frame)?;
+        let n = tcup.write_tap(inc).await?;
         println!("{n} bytes written");
     }
     Ok(())
