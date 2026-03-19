@@ -84,9 +84,9 @@ impl MockHost {
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ConnectionKey {
-    pub source_ip: Ipv4Addr,
-    pub source_port: u16,
-    pub destination_ip: Ipv4Addr,
-    pub destination_port: u16,
+pub struct TCPCon {
+    pub sip: Ipv4Addr,
+    pub sport: u16,
+    pub dip: Ipv4Addr,
+    pub dport: u16,
 }

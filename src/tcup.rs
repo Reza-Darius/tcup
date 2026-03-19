@@ -5,7 +5,7 @@ use std::{collections::HashMap, net::Ipv4Addr};
 use crate::error::Result;
 use crate::eth::{ETH_FRAME_MAX_SIZE, EthFrame, handle_frame};
 use crate::tap::TAPDevice;
-use crate::types::{ConnectionKey, MockHost, Socket};
+use crate::types::{MockHost, Socket, TCPCon};
 use crate::utils::setup_cap;
 use parking_lot::RwLock;
 use tracing::{error, info};
@@ -14,7 +14,7 @@ use tracing::{error, info};
 pub struct TCup {
     pub ip: Ipv4Addr,
     pub tap: TAPDevice,
-    pub con_table: RwLock<HashMap<ConnectionKey, Socket>>,
+    pub con_table: RwLock<HashMap<TCPCon, Socket>>,
 }
 
 impl TCup {

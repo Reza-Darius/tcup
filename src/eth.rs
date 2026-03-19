@@ -6,7 +6,9 @@ use tracing::instrument;
 use crate::arp::handle_arp;
 use crate::error::Result;
 use crate::ip::{IP_HDR_MAXSIZE, IP_HDR_MINSIZE, IP_hdr, handle_ip_frame};
-use crate::tcp::{PseudoHdr, TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_PSEUDOHDR_SIZE, TCP_hdr};
+use crate::tcp::{
+    PseudoHdr, TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_PSEUDOHDR_SIZE, hdr::TCP_hdr, opts::TCP_opts,
+};
 use crate::tcup::TCup;
 use crate::types::{MAC, MockHost};
 use crate::utils::{calc_checksum_be, mac_to_str};
@@ -65,6 +67,20 @@ impl EthFrame {
 
         Ok(EthFrame {
             data: Vec::from(data),
+        })
+    }
+
+    pub fn with_cap(cap: usize) -> Result<Self> {
+        if cap > ETH_FRAME_MAX_SIZE {
+            return Err("data exceeds MTU".into());
+        }
+
+        if cap < ETH_HDR_SIZE {
+            return Err("data below minimum eth hdr size".into());
+        }
+
+        Ok(EthFrame {
+            data: Vec::with_capacity(cap),
         })
     }
 
@@ -251,22 +267,28 @@ impl EthFrame {
         Ok(())
     }
 
-    pub fn get_tcp_opt(&self) -> Option<&[u8]> {
+    fn get_tcp_opt(&self) -> Result<Option<TCP_opts>> {
         let tcphdr_size = self.tcphdr_size();
-        if tcphdr_size <= TCP_HDR_MINSIZE {
-            return None;
+        if tcphdr_size < TCP_HDR_MINSIZE {
+            return Err("frame doesnt hold TCP header".into());
         }
 
         let opt_size = tcphdr_size - TCP_HDR_MINSIZE;
+
+        if opt_size == 0 {
+            return Ok(None);
+        }
 
         let lo = ETH_HDR_SIZE + self.iphdr_size() + TCP_HDR_MINSIZE;
         let hi = lo + opt_size;
 
         if self.len() < lo || self.len() < hi {
-            return None;
+            return Err("frame is too small for TCP options".into());
         }
 
-        Some(&self.data[lo..hi])
+        let opt_slice = &self.data[lo..hi];
+
+        TCP_opts::from_be_bytes(opt_slice).map(Option::Some)
     }
 
     pub fn get_tcp_pay(&self) -> Result<&[u8]> {

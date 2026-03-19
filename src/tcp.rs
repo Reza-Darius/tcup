@@ -1,17 +1,26 @@
+pub mod hdr;
+pub mod opts;
+
+use core::hash::Hasher;
+use std::hash::Hash;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
+use siphasher::sip::SipHasher13;
+use tokio::select;
 use tokio::sync::mpsc::{Receiver, channel};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::Result;
-use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_HDR_SIZE, ETH_P_IP, ETH_PAY_MAX_SIZE, Eth_hdr};
+use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_HDR_SIZE, ETH_P_IP, Eth_hdr};
 use crate::ip::{IP_DF, IP_HDR_MINSIZE, IP_hdr, IPPROTO_TCP, TOS_BEST_EFFORT, TTL_START};
+use crate::tcp::hdr::TCP_hdr;
+use crate::tcp::opts::TCP_opts;
 use crate::tcup::TCup;
-use crate::types::{ConnectionKey, MAC, Socket};
-use crate::utils::calc_checksum_be;
+use crate::types::{MAC, Socket, TCPCon};
 use crate::{eth::EthFrame, types::MockHost};
 
 pub const TCP_HDR_MINSIZE: usize = 20;
@@ -34,158 +43,6 @@ pub const MSL: u8 = 60;
 
 pub const CHAN_BUF_SIZE: usize = ETH_FRAME_MAX_SIZE * 10;
 
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-#[repr(C, packed)]
-pub struct TCP_hdr {
-    sport: u16, // source port
-    dport: u16, // destination port
-
-    seq: u32,
-    ack: u32,
-
-    len: u8, // first 4 bits, last 4 bits are reserved
-    flags: TCPFlags,
-    win_size: u16,
-    check: u16,
-    urg_ptr: u16,
-}
-
-impl TCP_hdr {
-    pub fn from_be_bytes(data: &[u8; TCP_HDR_MINSIZE]) -> Self {
-        let mut hdr: TCP_hdr = bytemuck::cast(*data);
-        hdr.sport = u16::from_be(hdr.sport);
-        hdr.dport = u16::from_be(hdr.dport);
-
-        hdr.seq = u32::from_be(hdr.seq);
-        hdr.ack = u32::from_be(hdr.ack);
-
-        hdr.win_size = u16::from_be(hdr.win_size);
-        hdr.urg_ptr = u16::from_be(hdr.urg_ptr);
-
-        hdr
-    }
-
-    pub fn into_be_bytes(mut self) -> [u8; TCP_HDR_MINSIZE] {
-        self.sport = u16::to_be(self.sport);
-        self.dport = u16::to_be(self.dport);
-
-        self.seq = u32::to_be(self.seq);
-        self.ack = u32::to_be(self.ack);
-
-        self.win_size = u16::to_be(self.win_size);
-        self.urg_ptr = u16::to_be(self.urg_ptr);
-
-        bytemuck::cast(self)
-    }
-
-    pub fn set_len(&mut self, len: usize) {
-        self.len = ((len >> 2) << 4) as u8
-    }
-
-    /// doff - data offset
-    pub fn len(&self) -> usize {
-        ((self.len >> 4) << 2) as usize
-    }
-
-    pub fn syn_only(&self) -> bool {
-        self.flags == TCPFlags::SYN
-    }
-
-    pub fn check_syn(&self) -> bool {
-        self.flags & TCPFlags::SYN == TCPFlags::SYN
-    }
-
-    pub fn set_syn(&mut self) -> &mut Self {
-        self.flags |= TCPFlags::SYN;
-        self
-    }
-
-    pub fn set_ack(&mut self) -> &mut Self {
-        self.flags |= TCPFlags::ACK;
-        self
-    }
-
-    pub fn check_ack(&self) -> bool {
-        self.flags & TCPFlags::ACK == TCPFlags::ACK
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct TCP_opts {
-    mss: Option<u16>, // max segment size, usually 1460
-    wnd_scl: Option<u8>,
-    sack_perm: bool,
-
-    time_stamp: Option<(u32, u32)>,
-}
-
-// TCP option kinds
-const OPT_EOL: u8 = 0;
-const OPT_NOP: u8 = 1;
-const OPT_MSS: u8 = 2;
-const OPT_WSCL: u8 = 3;
-const OPT_SACK_PERM: u8 = 4;
-const OPT_SACK: u8 = 5;
-const OPT_TIME_STMP: u8 = 8;
-const OPT_FAST_OPEN: u8 = 34;
-
-impl TCP_opts {
-    fn parse(mut tcp_opts: &[u8]) -> Result<Self> {
-        let mut opts = TCP_opts::default();
-
-        while !tcp_opts.is_empty() {
-            match tcp_opts {
-                [OPT_EOL, ..] => return Ok(opts),
-                [OPT_NOP, rest @ ..] => tcp_opts = rest,
-                [kind, len, rest @ ..] => {
-                    let len = *len as usize;
-                    if len < 2 || rest.len() < len - 2 {
-                        return Err("invalid TCP option length".into());
-                    }
-
-                    match *kind {
-                        OPT_MSS => {
-                            if len != 4 {
-                                return Err("invalid MSS length".into());
-                            }
-                            opts.mss = Some(u16::from_be_bytes([rest[0], rest[1]]))
-                        }
-                        OPT_WSCL => {
-                            if len != 3 {
-                                return Err("invalid window scale length".into());
-                            }
-                            opts.wnd_scl = Some(rest[0]);
-                        }
-                        OPT_SACK_PERM => {
-                            opts.sack_perm = true;
-                        }
-                        OPT_TIME_STMP => {
-                            if len != 10 {
-                                return Err("invalid window scale length".into());
-                            }
-
-                            let ts_val = u32::from_be_bytes(rest[..4].try_into()?);
-                            let ts_ecr = u32::from_be_bytes(rest[4..8].try_into()?);
-
-                            opts.time_stamp = Some((ts_val, ts_ecr));
-                        }
-
-                        _ => return Err("unsupported TCP options".into()),
-                    }
-
-                    tcp_opts = &tcp_opts[len..];
-                }
-                _ => return Err("unsupported TCP option".into()),
-            }
-        }
-        Err("option slice ended before EOL".into())
-    }
-
-    fn into_be_bytes(self) -> [u8; TCP_OPT_MAX_SIZE] {
-        todo!()
-    }
-}
-
 /// socket control block
 #[derive(Debug)]
 pub struct SkCb {
@@ -196,24 +53,12 @@ pub struct SkCb {
     status: TCPState,
     tcb: Tcb,
 
-    // host information, will be replaced by socket API
-    s_addr: Ipv4Addr,
-    s_mac: MAC,
-    s_port: u16,
-
-    // connection info
-    d_addr: Ipv4Addr,
-    d_mac: MAC,
+    con: TCPCon,
+    eth_hdr: Eth_hdr, // header to be attached to outgoing messages, need to deprecate this
 }
 
 impl SkCb {
-    fn new(
-        rx: Receiver<EthFrame>,
-        tcup: Arc<TCup>,
-        host: &MockHost,
-        d_addr: Ipv4Addr,
-        d_mac: MAC,
-    ) -> Self {
+    fn new(rx: Receiver<EthFrame>, tcup: Arc<TCup>, eth_hdr: Eth_hdr, con: TCPCon) -> Self {
         SkCb {
             rcv_chan: rx,
             snd_chan: tcup,
@@ -222,16 +67,17 @@ impl SkCb {
             status: TCPState::Closed,
             tcb: Tcb::default(),
 
-            s_addr: host.addr,
-            s_mac: host.mac,
-            s_port: host.port,
-
-            d_addr,
-            d_mac,
+            eth_hdr: Eth_hdr::new(
+                MAC::from_octets(eth_hdr.smac),
+                MAC::from_octets(eth_hdr.dmac),
+                ETH_P_IP,
+            ),
+            con,
         }
     }
 
-    fn send_packet(&self, tcp_hdr: TCP_hdr, opts: Option<TCP_opts>, tcp_pay: &[u8]) -> Result<()> {
+    /// sends a packet through the open connection
+    async fn reply(&self, tcp_hdr: TCP_hdr, opts: Option<TCP_opts>, tcp_pay: &[u8]) -> Result<()> {
         let ip_tot_len = IP_HDR_MINSIZE + tcp_hdr.len() + tcp_pay.len();
         let mut ip_hdr = IP_hdr {
             ver_ihl: 0,
@@ -242,19 +88,15 @@ impl SkCb {
             ttl: TTL_START,
             prot: IPPROTO_TCP,
             checksum: 0,
-            src_addr: self.s_addr.octets(),
-            dest_addr: self.d_addr.octets(),
+            src_addr: self.con.sip.octets(),
+            dest_addr: self.con.dip.octets(),
         };
 
         ip_hdr.set_ihl(IP_HDR_MINSIZE)?;
 
-        let mut packet = EthFrame {
-            data: Vec::with_capacity(ETH_HDR_SIZE + ip_tot_len),
-        };
+        let mut packet = EthFrame::with_cap(ETH_HDR_SIZE + ip_tot_len)?;
 
-        let eth_hdr = Eth_hdr::new(self.d_mac, self.s_mac, ETH_P_IP);
-
-        packet.set_eth_hdr(eth_hdr);
+        packet.set_eth_hdr(self.eth_hdr);
         packet.set_ip_hdr(ip_hdr)?;
         packet.set_tcp_hdr(tcp_hdr)?;
         packet.set_tcp_pay(tcp_pay)?;
@@ -265,6 +107,12 @@ impl SkCb {
         ))?;
         packet.set_ip_check()?;
 
+        // do we need a timeout?
+        let n = self.snd_chan.write_tap(packet).await?;
+
+        assert_eq!(n, ETH_HDR_SIZE + ip_hdr.tot_len as usize);
+
+        info!("{n} bytes written");
         Ok(())
     }
 }
@@ -288,6 +136,16 @@ pub struct Tcb {
     seg_wnd: u32,
 }
 
+impl Tcb {
+    fn ridx(&self) -> usize {
+        (self.rcv_nxt - self.irs) as usize
+    }
+
+    fn sidx(&self) -> usize {
+        (self.snd_nxt - self.iss) as usize
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub enum TCPState {
     SynSent,
@@ -307,7 +165,7 @@ bitflags! {
     /// the 13th octet in the header can be used for direct lookup
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable, Default)]
     #[repr(C)]
-    struct TCPFlags: u8 {
+    pub struct TCPFlags: u8 {
         /// Congestion Window Reduced (C) is used for informing that the sender reduced its sending rate
         const CWR = 0b10000000;
         /// ECN Echo (E) informs that the sender received a congestion notification
@@ -362,11 +220,11 @@ pub async fn handle_tcp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> 
     let ip_hdr = inc.get_ip_hdr()?;
     let tcp_hdr = inc.get_tcp_hdr()?;
 
-    let con_k = ConnectionKey {
-        source_ip: Ipv4Addr::from_octets(ip_hdr.src_addr),
-        source_port: tcp_hdr.sport,
-        destination_ip: Ipv4Addr::from_octets(ip_hdr.dest_addr),
-        destination_port: tcp_hdr.dport,
+    let con_k = TCPCon {
+        sip: Ipv4Addr::from_octets(ip_hdr.src_addr),
+        sport: tcp_hdr.sport,
+        dip: Ipv4Addr::from_octets(ip_hdr.dest_addr),
+        dport: tcp_hdr.dport,
     };
 
     let sock = tcup.con_table.read().get(&con_k).cloned();
@@ -388,58 +246,94 @@ pub async fn handle_tcp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> 
         let (tx, rx) = channel::<EthFrame>(CHAN_BUF_SIZE);
         tcup.con_table.write().insert(con_k, Socket { tx });
 
-        let skcb = SkCb::new(
-            rx,
-            tcup.clone(),
-            host,
-            con_k.source_ip,
-            MAC::from_octets(eth_hdr.smac),
-        );
-        tokio::spawn(handshake(inc, skcb));
+        let mut skcb = SkCb::new(rx, tcup.clone(), eth_hdr, con_k);
+
+        // priming the TCP loops
+        skcb.status = TCPState::SynReceived;
+
+        tokio::spawn(tcp_processing(inc, skcb));
 
         Ok(())
     }
 }
 
-async fn handshake(inc: EthFrame, mut skcb: SkCb) -> Result<()> {
+async fn tcp_processing(inc: EthFrame, mut skcb: SkCb) -> Result<()> {
+    loop {
+        match skcb.status {
+            TCPState::SynSent => todo!(),
+            TCPState::SynReceived => handshake(&inc, &mut skcb).await?,
+            TCPState::Established => todo!(),
+            TCPState::FinWait1 => todo!(),
+            TCPState::FinWait2 => todo!(),
+            TCPState::CloseWait => todo!(),
+            TCPState::Closing => todo!(),
+            TCPState::LastAck => todo!(),
+            TCPState::Closed => todo!(),
+        };
+    }
+}
+
+async fn handshake(inc: &EthFrame, skcb: &mut SkCb) -> Result<()> {
     let req_ip_hdr = inc.get_ip_hdr()?;
     let req_tcp_hdr = inc.get_tcp_hdr()?;
 
-    skcb.status = TCPState::SynReceived;
-
     // send off SYNACK
 
-    todo!()
-}
+    skcb.tcb.iss = req_tcp_hdr.seq;
+    skcb.tcb.irs = new_isn(&skcb.con);
 
-async fn tcp_loop() {}
+    let mut tcp_hdr = TCP_hdr {
+        sport: skcb.con.sport,
+        dport: skcb.con.dport,
+        seq: skcb.tcb.irs,
+        ack: req_tcp_hdr.seq + 1,
+        flags: TCPFlags::default(),
+        win_size: u16::MAX,
+        ..Default::default()
+    };
+
+    let opts = TCP_opts {
+        mss: Some(1460),
+        ..Default::default()
+    };
+
+    tcp_hdr.set_syn();
+    tcp_hdr.set_ack();
+    tcp_hdr.set_len(TCP_HDR_MINSIZE + opts.len())?;
+
+    skcb.reply(tcp_hdr, Some(opts), &[]).await?;
+
+    // wait for response or timeout
+    select! {
+        _ = tokio::time::sleep(Duration::new(10, 0)) =>  {
+            debug!("handshake timed out");
+
+            skcb.status = TCPState::Closed;
+            Ok(())
+        }
+        Some(frame) = skcb.rcv_chan.recv() => {
+            info!("connection established!");
+            println!("SYNACK received!\n{}\n", frame.get_tcp_hdr()?);
+
+            skcb.status = TCPState::Established;
+            Ok(())
+        }
+    }
+}
 
 fn parse_options(framge: EthFrame) -> Option<TCP_opts> {
     todo!()
 }
 
-fn new_isn() -> u32 {
-    todo!()
-}
+// TODO: implement 4 microsecond clock
+fn new_isn(con: &TCPCon) -> u32 {
+    let secret = "i love green tea!";
+    let key: &[u8; 16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    let mut hasher = SipHasher13::new_with_key(key);
 
-fn tcp_checksum(phdr: PseudoHdr, mut hdr: TCP_hdr, opts: Option<TCP_opts>, pay: &[u8]) -> u16 {
-    let mut buf = [0u8; ETH_PAY_MAX_SIZE - IP_HDR_MINSIZE + TCP_PSEUDOHDR_SIZE];
-    let mut offset = 0;
-    hdr.check = 0;
+    time::UtcDateTime::now().hash(&mut hasher);
+    secret.hash(&mut hasher);
+    con.hash(&mut hasher);
 
-    buf[..TCP_PSEUDOHDR_SIZE].copy_from_slice(&phdr.into_be_bytes());
-    offset += TCP_PSEUDOHDR_SIZE;
-
-    buf[offset..offset + TCP_HDR_MINSIZE].copy_from_slice(&hdr.into_be_bytes());
-    offset += TCP_HDR_MINSIZE;
-
-    if let Some(opts) = opts {
-        let opt_size = hdr.len() - TCP_HDR_MINSIZE;
-        buf[offset..offset + opt_size].copy_from_slice(&opts.into_be_bytes());
-        offset += opt_size;
-    }
-
-    buf[offset..offset + pay.len()].copy_from_slice(pay);
-
-    calc_checksum_be(&buf)
+    hasher.finish() as u32
 }
