@@ -4,12 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use tracing::{error, info};
 
 use crate::{
-    error::Result,
-    eth::EthFrame,
-    icmp::handle_icmp,
-    tap::TAPDevice,
-    tcp::handle_tcp,
-    types::{MockHost, TCup},
+    error::Result, eth::EthFrame, icmp::handle_icmp, tcp::handle_tcp, tcup::TCup, types::MockHost,
     utils::calc_checksum_be,
 };
 
@@ -23,6 +18,11 @@ pub const TTL_START: u8 = 64;
 pub const IPPROTO_ICMP: u8 = libc::IPPROTO_ICMP as u8;
 pub const IPPROTO_TCP: u8 = libc::IPPROTO_TCP as u8;
 pub const IPPROTO_UDP: u8 = libc::IPPROTO_UDP as u8;
+
+pub const IP_RF: u16 = 0x8000; // reserved
+pub const IP_DF: u16 = 0x4000; // don't fragment
+pub const IP_MF: u16 = 0x2000; // more fragments
+pub const FRAG_OFFSET_MASK: u16 = 0x1FFF;
 
 #[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C, packed)]
@@ -93,11 +93,6 @@ impl IP_hdr {
     }
 
     pub fn is_fragmented(&self) -> bool {
-        const IP_RF: u16 = 0x8000; // reserved
-        const IP_DF: u16 = 0x4000; // don't fragment
-        const IP_MF: u16 = 0x2000; // more fragments
-        const FRAG_OFFSET_MASK: u16 = 0x1FFF;
-
         (self.frag_off & IP_MF == 0) && (self.frag_off & FRAG_OFFSET_MASK == 0)
     }
 }

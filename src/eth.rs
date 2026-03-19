@@ -6,10 +6,10 @@ use tracing::instrument;
 use crate::arp::handle_arp;
 use crate::error::Result;
 use crate::ip::{IP_HDR_MAXSIZE, IP_HDR_MINSIZE, IP_hdr, handle_ip_frame};
-use crate::tap::TAPDevice;
-use crate::tcp::{TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_hdr};
-use crate::types::{MAC, MockHost, TCup};
-use crate::utils::mac_to_str;
+use crate::tcp::{PseudoHdr, TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_PSEUDOHDR_SIZE, TCP_hdr};
+use crate::tcup::TCup;
+use crate::types::{MAC, MockHost};
+use crate::utils::{calc_checksum_be, mac_to_str};
 
 /*
 #define ETH_ALEN	6		        /* Octets in one ethernet addr	 */
@@ -38,18 +38,19 @@ pub const ETH_P_ARP: u16 = 0x0806;
 const ETH_PAY_OFFSET: usize = ETH_HDR_SIZE;
 
 const IP_HDR_OFFSET: usize = ETH_HDR_SIZE;
+const IP_CHECK_OFFSET: usize = ETH_HDR_SIZE + 10;
+/// minimum offset
 const IP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
 
 const TCP_HDR_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
+const TCP_CHECK_OFFSET_FROM_HDR: usize = 16;
+/// minimum offset
 const TCP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE + TCP_HDR_MINSIZE;
 
 #[derive(Debug, Default, Clone)]
 pub struct EthFrame {
     // network order bytes
     pub data: Vec<u8>,
-    // additional offsets in case of option fields, TODO: pack both lengths into a single u8
-    pub ip_hdr_offset: u8,
-    pub tcp_hdr_offset: u8,
 }
 
 impl EthFrame {
@@ -64,7 +65,6 @@ impl EthFrame {
 
         Ok(EthFrame {
             data: Vec::from(data),
-            ..Default::default()
         })
     }
 
@@ -74,6 +74,15 @@ impl EthFrame {
 
     pub fn as_bytes(&self) -> &[u8] {
         self.data.as_slice()
+    }
+
+    fn iphdr_size(&self) -> usize {
+        ((self.data[ETH_HDR_SIZE] & 0x0F) << 2) as usize
+    }
+
+    fn tcphdr_size(&self) -> usize {
+        let ip_hdr_size = self.iphdr_size();
+        ((self.data[ETH_HDR_SIZE + ip_hdr_size] >> 4) << 2) as usize
     }
 
     pub fn get_eth_hdr(&self) -> Eth_hdr {
@@ -122,76 +131,164 @@ impl EthFrame {
     }
 
     pub fn set_ip_hdr(&mut self, hdr: IP_hdr) -> Result<()> {
-        if self.data.len() < IP_HDR_OFFSET + IP_HDR_MINSIZE {
+        let lo = IP_HDR_OFFSET;
+        let hi = IP_HDR_OFFSET + IP_HDR_MINSIZE;
+
+        if self.data.len() < hi {
             return Err("data too small to write IP hdr".into());
         }
 
-        if hdr.len() > IP_HDR_MINSIZE {
-            self.ip_hdr_offset = (hdr.len() - IP_HDR_MINSIZE) as u8;
-        }
+        // currently doesnt support IP options
+        assert_eq!(hdr.len(), IP_HDR_MAXSIZE);
 
-        assert!(hdr.len() < IP_HDR_MAXSIZE);
-
-        self.data.as_mut_slice()[IP_HDR_OFFSET..IP_HDR_OFFSET + IP_HDR_MINSIZE]
-            .copy_from_slice(&hdr.into_be_bytes());
+        self.data.as_mut_slice()[lo..hi].copy_from_slice(&hdr.into_be_bytes());
 
         Ok(())
     }
 
+    pub fn set_ip_check(&mut self) -> Result<()> {
+        if self.len() < IP_CHECK_OFFSET + 1 {
+            return Err("cant set ip checksum, len is too small".into());
+        }
+
+        let offset = IP_CHECK_OFFSET;
+
+        // setting to 0 before calculation
+        self.data[offset] = 0;
+        self.data[offset + 1] = 0;
+
+        let check = calc_checksum_be(&self.data[ETH_HDR_SIZE..ETH_HDR_SIZE + self.iphdr_size()]);
+
+        self.data[offset..offset + size_of::<u16>()].copy_from_slice(&u16::to_be_bytes(check));
+        Ok(())
+    }
+
     pub fn get_ip_pay(&self) -> Result<&[u8]> {
-        if self.len() < IP_PAY_OFFSET + self.ip_hdr_offset as usize {
+        let offset = ETH_HDR_SIZE + self.iphdr_size();
+
+        if self.len() < offset {
             return Err("no IP payload found".into());
         }
 
-        Ok(&self.data.as_slice()[IP_PAY_OFFSET + self.ip_hdr_offset as usize..])
+        Ok(&self.data.as_slice()[offset..])
     }
 
     pub fn get_ip_pay_mut(&mut self) -> Result<&mut [u8]> {
-        if self.len() < IP_PAY_OFFSET + self.ip_hdr_offset as usize {
+        let offset = ETH_HDR_SIZE + self.iphdr_size();
+        if self.len() < offset {
             return Err("no IP payload found".into());
         }
 
-        Ok(&mut self.data.as_mut_slice()[IP_PAY_OFFSET + self.ip_hdr_offset as usize..])
+        Ok(&mut self.data.as_mut_slice()[offset..])
     }
 
+    /// overwrites the IP payload of the frame with data
     pub fn set_ip_pay(&mut self, data: &[u8]) -> Result<()> {
-        if IP_PAY_OFFSET + data.len() > ETH_FRAME_MAX_SIZE {
+        let offset = ETH_HDR_SIZE + self.iphdr_size();
+
+        if offset + data.len() > ETH_FRAME_MAX_SIZE {
             return Err("data exceeds MTU".into());
         }
 
-        self.data
-            .truncate(IP_PAY_OFFSET + self.ip_hdr_offset as usize);
+        self.data.truncate(offset);
         self.data.extend_from_slice(data);
 
         Ok(())
     }
 
     pub fn get_tcp_hdr(&self) -> Result<TCP_hdr> {
-        let start = TCP_HDR_OFFSET + self.ip_hdr_offset as usize;
-        let end = TCP_HDR_OFFSET + TCP_HDR_MINSIZE + self.ip_hdr_offset as usize;
+        let lo = ETH_HDR_SIZE + self.iphdr_size();
+        let hi = lo + TCP_HDR_MINSIZE;
 
-        if self.data.len() < end {
+        if self.data.len() < hi {
             return Err("not enough data to retrieve TCP header".into());
         }
 
-        Ok(TCP_hdr::from_be_bytes(self.data[start..end].try_into()?))
+        Ok(TCP_hdr::from_be_bytes(self.data[lo..hi].try_into()?))
     }
 
     pub fn set_tcp_hdr(&mut self, hdr: TCP_hdr) -> Result<()> {
-        let start = TCP_HDR_OFFSET + self.ip_hdr_offset as usize;
-        let end = TCP_HDR_OFFSET + TCP_HDR_MINSIZE + self.ip_hdr_offset as usize;
+        let lo = ETH_HDR_SIZE + self.iphdr_size();
+        let hi = lo + TCP_HDR_MINSIZE;
 
-        if self.data.len() < end {
+        if self.data.len() < hi {
             return Err("frame data too small to write TCP header".into());
         }
 
-        if hdr.len() > TCP_HDR_MINSIZE {
-            self.ip_hdr_offset = (hdr.len() - TCP_HDR_MINSIZE) as u8;
+        assert!(hdr.len() <= TCP_HDR_MAXSIZE);
+
+        self.data.as_mut_slice()[lo..hi].copy_from_slice(&hdr.into_be_bytes());
+
+        Ok(())
+    }
+
+    /// sets the TCP checksum, needs to be called after setting the ip payload!
+    pub fn set_tcp_check(&mut self, phdr: PseudoHdr) -> Result<()> {
+        // set TCP check to 0
+        let check_off = ETH_HDR_SIZE + self.iphdr_size() + TCP_CHECK_OFFSET_FROM_HDR;
+        self.data[check_off] = 0;
+        self.data[check_off + 1] = 0;
+
+        // populate buffer for checksum calculation
+        let mut buf = [0u8; ETH_PAY_MAX_SIZE - IP_HDR_MINSIZE + TCP_PSEUDOHDR_SIZE];
+        let mut buf_off = 0;
+
+        buf[..TCP_PSEUDOHDR_SIZE].copy_from_slice(&phdr.into_be_bytes());
+        buf_off += TCP_PSEUDOHDR_SIZE;
+
+        let ip_pay = self.get_ip_pay()?;
+
+        if buf.len() < TCP_PSEUDOHDR_SIZE + ip_pay.len() {
+            return Err("intermediate checksum buffer cant hold payload".into());
         }
 
-        assert!(hdr.len() < TCP_HDR_MAXSIZE);
+        buf[buf_off..buf_off + ip_pay.len()].copy_from_slice(ip_pay);
+        buf_off += ip_pay.len();
 
-        self.data.as_mut_slice()[start..end].copy_from_slice(&hdr.into_be_bytes());
+        let check = calc_checksum_be(&buf[..buf_off]);
+        self.data[check_off..check_off + size_of::<u16>()].copy_from_slice(&check.to_be_bytes());
+
+        Ok(())
+    }
+
+    pub fn get_tcp_opt(&self) -> Option<&[u8]> {
+        let tcphdr_size = self.tcphdr_size();
+        if tcphdr_size <= TCP_HDR_MINSIZE {
+            return None;
+        }
+
+        let opt_size = tcphdr_size - TCP_HDR_MINSIZE;
+
+        let lo = ETH_HDR_SIZE + self.iphdr_size() + TCP_HDR_MINSIZE;
+        let hi = lo + opt_size;
+
+        if self.len() < lo || self.len() < hi {
+            return None;
+        }
+
+        Some(&self.data[lo..hi])
+    }
+
+    pub fn get_tcp_pay(&self) -> Result<&[u8]> {
+        let offset = ETH_HDR_SIZE + self.iphdr_size() + self.tcphdr_size();
+
+        if offset > self.data.len() {
+            return Err("frame data is too small for requested TCP payload".into());
+        }
+
+        Ok(&self.data.as_slice()[offset..])
+    }
+
+    /// overwrites the TCP payload with data
+    pub fn set_tcp_pay(&mut self, data: &[u8]) -> Result<()> {
+        let offset = ETH_HDR_SIZE + self.iphdr_size() + self.tcphdr_size();
+
+        if offset + data.len() > ETH_FRAME_MAX_SIZE {
+            return Err("data exceeds MTU".into());
+        }
+
+        self.data.truncate(offset);
+        self.data.extend_from_slice(data);
 
         Ok(())
     }
@@ -200,9 +297,9 @@ impl EthFrame {
 #[derive(Debug, Default, Pod, Zeroable, Clone, Copy)]
 #[repr(C, packed)]
 pub struct Eth_hdr {
-    dmac: [u8; MAC_ADDR_LEN], // dest MAC address
-    smac: [u8; MAC_ADDR_LEN], // src MAC address
-    prot_type: u16,
+    pub dmac: [u8; MAC_ADDR_LEN], // dest MAC address
+    pub smac: [u8; MAC_ADDR_LEN], // src MAC address
+    pub prot_type: u16,
 }
 
 impl std::fmt::Display for Eth_hdr {

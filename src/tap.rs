@@ -45,9 +45,7 @@ impl TAPDevice {
         ifreq.ifrname[..name.len()].copy_from_slice(name.as_bytes());
         assert_eq!(ifreq.ifrname[name.len()], 0);
 
-        unsafe { rustix
-                ::ioctl::ioctl(&fd, &mut ifreq)? };
-
+        unsafe { rustix::ioctl::ioctl(&fd, &mut ifreq)? };
 
         Ok(TAPDevice {
             name: name.to_string(),
@@ -72,7 +70,9 @@ impl TAPDevice {
         loop {
             let mut guard = self.fd.readable().await?;
 
-            match guard.try_io(|inner| rustix::io::read(inner.get_ref(), &mut *buf).map_err(Into::into)) {
+            match guard
+                .try_io(|inner| rustix::io::read(inner.get_ref(), &mut *buf).map_err(Into::into))
+            {
                 Ok(res) => return Ok(res?),
                 Err(_would_block) => continue,
             }
@@ -156,43 +156,4 @@ union Ifreqdata {
     ifrflags: i16,
     hwaddr: libc::sockaddr,
     data: [u8; IFRQ_UNION_SIZE],
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        eth::{ETH_FRAME_MAX_SIZE, Eth_hdr},
-        utils::setup_cap,
-    };
-
-    use super::*;
-    use std::process::Command;
-
-
-
-    // #[test]
-    // fn tap_ip() -> Result<()> {
-    //     let name = "tap0";
-    //     let route = "10.0.0.0/24";
-    //     let addr = "10.0.0.5/24";
-
-    //     setup_cap().unwrap();
-
-    //     let tap = TAPDevice::new(name)?;
-    //     tap.set_if_link()?;
-    //     tap.set_if_route(route)?;
-    //     // tap.set_if_addr(addr)?;
-
-    //     loop {
-    //         let mut buf = Box::new([0u8; ETH_FRAME_MAX_SIZE]);
-
-    //         println!("listening...");
-
-    //         let n = tap.read(&mut *buf).await.unwrap();
-    //         println!("{n} bytes received");
-
-    //         let hdr = Eth_hdr::from_be_bytes(&buf[..14].try_into().unwrap());
-    //         println!("{hdr}");
-    //     }
-    // }
 }

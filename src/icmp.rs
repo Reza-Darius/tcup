@@ -10,8 +10,8 @@ use tracing::info;
 use crate::error::Result;
 use crate::eth::{ETH_HDR_SIZE, ETH_P_IP, ETH_PAY_MAX_SIZE, Eth_hdr, EthFrame};
 use crate::ip::{IP_HDR_MINSIZE, IP_hdr, IPPROTO_ICMP, TOS_BEST_EFFORT, TTL_START};
-use crate::types::TCup;
-use crate::{tap::TAPDevice, types::MockHost, utils::calc_checksum_be};
+use crate::tcup::TCup;
+use crate::{types::MockHost, utils::calc_checksum_be};
 
 const TYPE_ECHO_REPLY: u8 = 0;
 const TYPE_ECHO_REQ: u8 = 8;
@@ -175,10 +175,7 @@ async fn handle_echo_req(req: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) ->
 
     assert_eq!(reply.len(), ETH_HDR_SIZE + req_ip_hdr.tot_len as usize);
 
-    let frame = EthFrame {
-        data: reply,
-        ..Default::default()
-    };
+    let frame = EthFrame { data: reply };
 
     println!("reply eth: {}\n", rep_eth_hdr);
     println!("reply ip: {}", rep_ip_hdr);

@@ -1,11 +1,10 @@
 use std::net::Ipv4Addr;
 use std::{fmt::Display, sync::Arc};
 
-use crate::types::TCup;
+use crate::tcup::TCup;
 use crate::{
     error::Result,
     eth::{ETH_P_ARP, Eth_hdr, EthFrame},
-    tap::TAPDevice,
     types::{MAC, MockHost},
     utils::mac_to_str,
 };

@@ -1,11 +1,8 @@
-use std::str::FromStr;
 use std::{collections::HashMap, net::Ipv4Addr};
 
 use crate::error::Result;
 use crate::eth::EthFrame;
-use crate::tap::TAPDevice;
-use crate::utils::{mac_to_str, setup_cap};
-use parking_lot::RwLock;
+use crate::utils::mac_to_str;
 use tokio::sync::mpsc::Sender;
 
 #[allow(clippy::upper_case_acronyms)]
@@ -62,6 +59,8 @@ pub struct MockHost {
     pub arp_table: HashMap<Ipv4Addr, MAC>,
     pub addr: Ipv4Addr,
     pub mac: MAC,
+
+    pub port: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -70,56 +69,18 @@ pub struct Socket {
 }
 
 impl MockHost {
-    pub fn new(ip: Ipv4Addr, mac: MAC) -> Self {
+    pub fn new(ip: Ipv4Addr, mac: MAC, port: u16) -> Self {
         MockHost {
             arp_table: HashMap::new(),
             addr: ip,
             mac,
+            port,
         }
     }
 
     pub fn get_mac(&self, ip: impl Into<Ipv4Addr>) -> Option<MAC> {
         self.arp_table.get(&ip.into()).copied()
     }
-}
-
-#[derive(Debug)]
-pub struct TCup {
-    pub ip: Ipv4Addr,
-    pub tap: TAPDevice,
-    pub con_table: RwLock<HashMap<ConnectionKey, Socket>>,
-}
-
-impl TCup {
-    pub fn init(name: &str, addr: &str) -> Result<Self> {
-        setup_cap()?;
-
-        let tap = TAPDevice::new(name)?;
-        tap.set_if_link()?;
-        tap.set_if_addr(addr)?;
-
-        let tcup = TCup {
-            ip: Ipv4Addr::from_str(addr)?,
-            tap,
-            con_table: RwLock::new(HashMap::new()),
-        };
-
-        Ok(tcup)
-    }
-
-    /// reads from the TAP device
-    pub async fn read_tap(&self, buf: &mut [u8]) -> Result<usize> {
-        self.tap.read(buf).await
-    }
-
-    /// writes to the TAP device
-    pub async fn write_tap(&self, frame: EthFrame) -> Result<usize> {
-        self.tap.write(frame).await
-    }
-
-    // pub fn get_socket(&self, con_k: &ConnectionKey) -> Option<&Socket> {
-    //     self.con_table.read().table.get(con_k)
-    // }
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
