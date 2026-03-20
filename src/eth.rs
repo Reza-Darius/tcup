@@ -47,7 +47,7 @@ const IP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
 
 const TCP_HDR_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
 const TCP_CHECK_OFFSET_FROM_HDR: usize = 16;
-const TCP_HDR_DOF_OFF: usize = 12;
+pub const TCP_HDR_DOF_OFF: usize = 12;
 /// minimum offset
 const TCP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE + TCP_HDR_MINSIZE;
 

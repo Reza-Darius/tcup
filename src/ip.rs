@@ -58,28 +58,27 @@ impl IP_hdr {
         self.tot_len = u16::to_be(self.tot_len);
         self.id = u16::to_be(self.id);
         self.checksum = u16::to_be(self.checksum);
+        self.frag_off = u16::to_be(self.frag_off);
 
         bytemuck::cast(self)
     }
 
     /// sets the header size, takes the length in bytes as argument
     pub fn set_ihl(&mut self, len: usize) -> Result<()> {
-        // number or 32 bit words
-        let mut n_32w = len / 4;
-
-        if !len.is_multiple_of(4) {
-            n_32w += 1;
-        }
-
-        if n_32w > 0b1111 {
+        if len > IP_HDR_MAXSIZE {
             return Err("length exceeding 4 bit capacity".into());
         }
-        if n_32w < IP_HDR_MINSIZE / 4 {
+        if len < IP_HDR_MINSIZE {
             return Err("length cant be smaller than 20 bytes".into());
         }
 
+        if len != IP_HDR_MINSIZE {
+            return Err("IP options arent supported".into());
+        }
+
         // set version to 4 with len
-        self.ver_ihl = (4 << 4) | n_32w as u8;
+        self.ver_ihl = (4 << 4) | (len as u8 >> 2);
+
         Ok(())
     }
 
@@ -110,6 +109,7 @@ fn get_hdr_ver(byte: u8) -> u8 {
 impl std::fmt::Display for IP_hdr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let ver = self.version();
+        let len = self.len();
         let tot = self.tot_len;
         let ttl = self.ttl;
         let prot = self.prot;
@@ -121,6 +121,7 @@ impl std::fmt::Display for IP_hdr {
         writeln!(f, "│ {:<15} │ {:<17} │", "Field", "Value")?;
         writeln!(f, "├─────────────────┼───────────────────┤")?;
         writeln!(f, "│ {:<15} │ {:<17} │", "version", ver)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "hdr len", len)?;
         writeln!(f, "│ {:<15} │ {:<17} │", "total length", tot)?;
         writeln!(f, "│ {:<15} │ {:<17} │", "TTL", ttl)?;
         writeln!(f, "│ {:<15} │ {:<17} │", "protocol", prot)?;

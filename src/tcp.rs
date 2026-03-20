@@ -15,7 +15,7 @@ use tokio::sync::mpsc::{Receiver, channel};
 use tracing::{debug, info, instrument, warn};
 
 use crate::error::Result;
-use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_HDR_SIZE, ETH_P_IP, Eth_hdr};
+use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_HDR_SIZE, ETH_P_IP, Eth_hdr, TCP_HDR_DOF_OFF};
 use crate::ip::{IP_DF, IP_HDR_MINSIZE, IP_hdr, IPPROTO_TCP, TOS_BEST_EFFORT, TTL_START};
 use crate::tcp::hdr::TCP_hdr;
 use crate::tcp::opts::TCP_opts;
@@ -83,7 +83,7 @@ impl SkCb {
             ver_ihl: 0,
             tos: TOS_BEST_EFFORT,
             tot_len: ip_tot_len as u16,
-            id: 0,
+            id: 1,
             frag_off: IP_DF,
             ttl: TTL_START,
             prot: IPPROTO_TCP,
@@ -112,9 +112,9 @@ impl SkCb {
         packet.set_ip_check()?;
 
         info!("sending reply");
-        println!("reply ETH:\n{}", self.eth_hdr);
-        println!("reply IP:\n{}", ip_hdr);
-        println!("reply TCP:\n{}", tcp_hdr);
+        println!("reply ETH:\n{}", packet.get_eth_hdr());
+        println!("reply IP:\n{}", packet.get_ip_hdr()?);
+        println!("reply TCP:\n{}", packet.get_tcp_hdr()?);
 
         // do we need a timeout?
         let n = self.snd_chan.write_tap(packet).await?;

@@ -177,8 +177,8 @@ async fn handle_echo_req(req: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) ->
 
     let frame = EthFrame { data: reply };
 
-    println!("reply eth: {}\n", rep_eth_hdr);
-    println!("reply ip: {}", rep_ip_hdr);
+    println!("reply eth:\n{}", rep_eth_hdr);
+    println!("reply ip:\n{}", rep_ip_hdr);
 
     let n = tcup.write_tap(frame).await?;
     println!("{n} bytes written");
