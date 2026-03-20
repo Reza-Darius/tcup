@@ -10,7 +10,7 @@ pub struct TCP_hdr {
     pub dport: u16, // destination port
     pub seq: u32,
     pub ack: u32,
-    /// len of the header, first 4 bits
+    /// len of the header including options, first 4 bits
     pub len: u8,
     pub flags: TCPFlags,
     pub win_size: u16,
@@ -51,13 +51,13 @@ impl TCP_hdr {
         if !(TCP_HDR_MINSIZE..=TCP_HDR_MAXSIZE).contains(&len) {
             return Err("len invalid for TCP header".into());
         }
-        self.len = ((len >> 2) << 4) as u8;
+        self.len = (((len >> 2) & 0xF) << 4) as u8;
         Ok(())
     }
 
     /// doff - data offset
     pub fn len(&self) -> usize {
-        ((self.len >> 4) << 2) as usize
+        (((self.len >> 4) & 0xF) << 2) as usize
     }
 
     pub fn syn_only(&self) -> bool {
@@ -93,7 +93,7 @@ impl std::fmt::Display for TCP_hdr {
         let dport = self.dport;
         let seq = self.seq;
         let ack = self.ack;
-        let len = self.len;
+        let len = self.len();
         let win_size = self.win_size;
         let check = self.check;
         let urg_ptr = self.urg_ptr;
@@ -101,61 +101,39 @@ impl std::fmt::Display for TCP_hdr {
 
         let hdr_bytes = (len >> 4) as u16 * 4;
 
-        writeln!(f, "┌─────────────────┬──────────────┐")?;
-        writeln!(f, "│ {:<15} │ {:<12} │", "Field", "Value")?;
-        writeln!(f, "├─────────────────┼──────────────┤")?;
-        writeln!(f, "│ {:<15} │ {:<12} │", "src port", sport)?;
-        writeln!(f, "│ {:<15} │ {:<12} │", "dst port", dport)?;
-        writeln!(f, "│ {:<15} │ {:#010x}   │", "seq", seq)?;
-        writeln!(f, "│ {:<15} │ {:#010x}   │", "ack", ack)?;
-        writeln!(
-            f,
-            "│ {:<15} │ {} ({} bytes) │",
-            "header len",
-            self.len(),
-            hdr_bytes
-        )?;
-        writeln!(f, "│ {:<15} │ {:<12} │", "window", win_size)?;
-        writeln!(f, "│ {:<15} │ {:#06x}      │", "checksum", check)?;
-        writeln!(f, "│ {:<15} │ {:<12} │", "urgent ptr", urg_ptr)?;
-        writeln!(f, "├─────────────────┼──────────────┤")?;
+        let active_flags: Vec<&str> = [
+            (TCPFlags::CWR, "CWR"),
+            (TCPFlags::ECE, "ECE"),
+            (TCPFlags::URG, "URG"),
+            (TCPFlags::ACK, "ACK"),
+            (TCPFlags::PSH, "PSH"),
+            (TCPFlags::RST, "RST"),
+            (TCPFlags::SYN, "SYN"),
+            (TCPFlags::FIN, "FIN"),
+        ]
+        .iter()
+        .filter_map(|(flag, name)| {
+            if flags.contains(*flag) {
+                Some(*name)
+            } else {
+                None
+            }
+        })
+        .collect();
 
-        let flag_names = if flags.is_empty() {
-            "none".to_string()
-        } else {
-            format!("{:?}", flags)
-        };
-        writeln!(f, "│ {:<15} │ {:<12} │", "flags", flag_names)?;
-
-        let bits = [
-            ("C", TCPFlags::CWR),
-            ("E", TCPFlags::ECE),
-            ("U", TCPFlags::URG),
-            ("A", TCPFlags::ACK),
-            ("P", TCPFlags::PSH),
-            ("R", TCPFlags::RST),
-            ("S", TCPFlags::SYN),
-            ("F", TCPFlags::FIN),
-        ];
-
-        let header_row: String = bits.iter().map(|(name, _)| format!("{} ", name)).collect();
-        let value_row: String = bits
-            .iter()
-            .map(|(_, flag)| {
-                if flags.contains(*flag) {
-                    "✓ ".to_string()
-                } else {
-                    ". ".to_string()
-                }
-            })
-            .collect();
-
-        writeln!(
-            f,
-            "│   {:<13} │   {:<10} │",
-            header_row.trim_end(),
-            value_row.trim_end()
-        )?;
-        write!(f, "└─────────────────┴──────────────┘")
+        writeln!(f, "┌─────────────────┬───────────────────┐")?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "Field", "Value")?;
+        writeln!(f, "├─────────────────┼───────────────────┤")?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "src port", sport)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "dst port", dport)?;
+        writeln!(f, "│ {:<15} │ {:#010x}        │", "seq", seq)?;
+        writeln!(f, "│ {:<15} │ {:#010x}        │", "ack", ack)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "header len", len)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "window", win_size)?;
+        writeln!(f, "│ {:<15} │ {:#06x}            │", "checksum", check)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "urgent ptr", urg_ptr)?;
+        writeln!(f, "├─────────────────┼───────────────────┤")?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "flags", active_flags.join(", "))?;
+        write!(f, "└─────────────────┴───────────────────┘")
     }
 }

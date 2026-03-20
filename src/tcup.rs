@@ -1,5 +1,7 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 use std::{collections::HashMap, net::Ipv4Addr};
 
 use crate::error::Result;
@@ -10,9 +12,13 @@ use crate::utils::setup_cap;
 use parking_lot::RwLock;
 use tracing::{error, info};
 
+pub static CLOCK: AtomicU64 = AtomicU64::new(0);
+pub const INTERVAL: u64 = 4;
+
 #[derive(Debug)]
 pub struct TCup {
     pub ip: Ipv4Addr,
+    pub sub: u8, // subnet mask
     pub tap: TAPDevice,
     pub con_table: RwLock<HashMap<TCPCon, Socket>>,
 }
@@ -25,8 +31,11 @@ impl TCup {
         tap.set_if_link()?;
         tap.set_if_addr(addr)?;
 
+        let mut parts = addr.split('/');
+
         let tcup = TCup {
-            ip: Ipv4Addr::from_str(addr)?,
+            ip: Ipv4Addr::from_str(parts.next().unwrap())?,
+            sub: str::parse::<u8>(parts.next().unwrap()).unwrap(),
             tap,
             con_table: RwLock::new(HashMap::new()),
         };
@@ -38,6 +47,8 @@ impl TCup {
     pub async fn listen(self, host: &mut MockHost) {
         let mut buf = Box::new([0u8; ETH_FRAME_MAX_SIZE]);
         let tcup = Arc::new(self);
+
+        tokio::spawn(drive_clock());
 
         loop {
             println!("listening...");
@@ -72,4 +83,12 @@ impl TCup {
     // pub fn get_socket(&self, con_k: &ConnectionKey) -> Option<&Socket> {
     //     self.con_table.read().table.get(con_k)
     // }
+}
+
+async fn drive_clock() {
+    let mut int = tokio::time::interval(Duration::new(INTERVAL, 0));
+    loop {
+        int.tick().await;
+        CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }

@@ -30,6 +30,7 @@ impl TCP_opts {
     }
 }
 
+/// wrapper for a byte array
 pub struct TCP_opts_bytes {
     data: [u8; TCP_OPT_MAX_SIZE],
     len: usize,
@@ -109,13 +110,14 @@ impl TCP_opts {
     }
 
     /// returns the data slice and the len of actual data
-    fn into_be_bytes(self) -> TCP_opts_bytes {
+    pub fn into_be_bytes(self) -> TCP_opts_bytes {
         let mut buf = [0u8; TCP_OPT_MAX_SIZE];
         let mut i = 0;
 
         fn set_len(len: usize, buf: &mut [u8], i: &mut usize) {
-            buf[*i..*i + 2].copy_from_slice(&len.to_be_bytes());
-            *i += 2;
+            let len = len as u8;
+            buf[*i..*i + 1].copy_from_slice(&len.to_be_bytes());
+            *i += 1;
         }
 
         if let Some(mss) = self.mss {

@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 use crate::arp::handle_arp;
 use crate::error::Result;
 use crate::ip::{IP_HDR_MAXSIZE, IP_HDR_MINSIZE, IP_hdr, handle_ip_frame};
+use crate::tcp::TCP_OPT_MAX_SIZE;
 use crate::tcp::{
     PseudoHdr, TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_PSEUDOHDR_SIZE, hdr::TCP_hdr, opts::TCP_opts,
 };
 use crate::tcup::TCup;
-use crate::types::{MAC, MockHost};
+use crate::types::{Mac, MockHost};
 use crate::utils::{calc_checksum_be, mac_to_str};
 
 /*
@@ -46,6 +47,7 @@ const IP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
 
 const TCP_HDR_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
 const TCP_CHECK_OFFSET_FROM_HDR: usize = 16;
+const TCP_HDR_DOF_OFF: usize = 12;
 /// minimum offset
 const TCP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE + TCP_HDR_MINSIZE;
 
@@ -80,7 +82,7 @@ impl EthFrame {
         }
 
         Ok(EthFrame {
-            data: Vec::with_capacity(cap),
+            data: vec![0u8; cap],
         })
     }
 
@@ -93,12 +95,16 @@ impl EthFrame {
     }
 
     fn iphdr_size(&self) -> usize {
-        ((self.data[ETH_HDR_SIZE] & 0x0F) << 2) as usize
+        let res = ((self.data[ETH_HDR_SIZE] & 0x0F) << 2) as usize;
+        assert!((IP_HDR_MINSIZE..=IP_HDR_MAXSIZE).contains(&res));
+        res
     }
 
     fn tcphdr_size(&self) -> usize {
-        let ip_hdr_size = self.iphdr_size();
-        ((self.data[ETH_HDR_SIZE + ip_hdr_size] >> 4) << 2) as usize
+        let offset = ETH_HDR_SIZE + self.iphdr_size() + TCP_HDR_DOF_OFF;
+        let res = (((self.data[offset] >> 4) & 0xF) << 2) as usize;
+        assert!((TCP_HDR_MINSIZE..=TCP_HDR_MAXSIZE).contains(&res));
+        res
     }
 
     pub fn get_eth_hdr(&self) -> Eth_hdr {
@@ -155,7 +161,7 @@ impl EthFrame {
         }
 
         // currently doesnt support IP options
-        assert_eq!(hdr.len(), IP_HDR_MAXSIZE);
+        assert_eq!(hdr.len(), IP_HDR_MINSIZE);
 
         self.data.as_mut_slice()[lo..hi].copy_from_slice(&hdr.into_be_bytes());
 
@@ -174,8 +180,13 @@ impl EthFrame {
         self.data[offset + 1] = 0;
 
         let check = calc_checksum_be(&self.data[ETH_HDR_SIZE..ETH_HDR_SIZE + self.iphdr_size()]);
-
         self.data[offset..offset + size_of::<u16>()].copy_from_slice(&u16::to_be_bytes(check));
+
+        assert_eq!(
+            0,
+            calc_checksum_be(&self.data[ETH_HDR_SIZE..ETH_HDR_SIZE + self.iphdr_size()])
+        );
+
         Ok(())
     }
 
@@ -224,6 +235,10 @@ impl EthFrame {
     }
 
     pub fn set_tcp_hdr(&mut self, hdr: TCP_hdr) -> Result<()> {
+        if !(TCP_HDR_MINSIZE..=TCP_HDR_MAXSIZE).contains(&hdr.len()) {
+            return Err("invalid TCP hdr size".into());
+        }
+
         let lo = ETH_HDR_SIZE + self.iphdr_size();
         let hi = lo + TCP_HDR_MINSIZE;
 
@@ -231,10 +246,42 @@ impl EthFrame {
             return Err("frame data too small to write TCP header".into());
         }
 
-        assert!(hdr.len() <= TCP_HDR_MAXSIZE);
-
         self.data.as_mut_slice()[lo..hi].copy_from_slice(&hdr.into_be_bytes());
 
+        assert_eq!(hdr.len(), self.tcphdr_size());
+        Ok(())
+    }
+
+    pub fn get_tcp_opts(&self) -> Result<TCP_opts> {
+        let lo = ETH_HDR_SIZE + self.iphdr_size() + TCP_HDR_MINSIZE;
+        let hi = lo + self.tcphdr_size() - TCP_HDR_MINSIZE;
+
+        if self.data.len() < hi {
+            return Err("frame data too small to retrieve TCP opts".into());
+        }
+
+        TCP_opts::from_be_bytes(&self.data[lo..hi])
+    }
+
+    pub fn set_tcp_opts(&mut self, opts: TCP_opts) -> Result<()> {
+        let opts = opts.into_be_bytes();
+        let lo = ETH_HDR_SIZE + self.iphdr_size() + TCP_HDR_MINSIZE;
+        let hi = lo + opts.len();
+
+        if self.data.len() < hi {
+            return Err(format!(
+                "frame is too small to hold TCP opts: data.len: {}, opt.len: {}",
+                self.len(),
+                opts.len()
+            )
+            .into());
+        }
+
+        assert!(opts.len() <= TCP_OPT_MAX_SIZE);
+
+        self.data.as_mut_slice()[lo..hi].copy_from_slice(&opts);
+
+        assert_eq!(self.tcphdr_size(), opts.len() + TCP_HDR_MINSIZE);
         Ok(())
     }
 
@@ -246,6 +293,7 @@ impl EthFrame {
         self.data[check_off + 1] = 0;
 
         // populate buffer for checksum calculation
+        // TODO: account for IP hdr options
         let mut buf = [0u8; ETH_PAY_MAX_SIZE - IP_HDR_MINSIZE + TCP_PSEUDOHDR_SIZE];
         let mut buf_off = 0;
 
@@ -263,6 +311,12 @@ impl EthFrame {
 
         let check = calc_checksum_be(&buf[..buf_off]);
         self.data[check_off..check_off + size_of::<u16>()].copy_from_slice(&check.to_be_bytes());
+
+        // for debug purposes only:
+        // writing into the buffer for check
+        let ctrl_off = TCP_PSEUDOHDR_SIZE + TCP_CHECK_OFFSET_FROM_HDR;
+        buf[ctrl_off..ctrl_off + size_of::<u16>()].copy_from_slice(&check.to_be_bytes());
+        assert_eq!(0, calc_checksum_be(&buf[..buf_off]));
 
         Ok(())
     }
@@ -335,16 +389,18 @@ impl std::fmt::Display for Eth_hdr {
             n => n.to_string(),
         };
 
-        write!(
-            f,
-            "\n{:<12} {:>17}\n{:<12} {:>17}\n{:<12} {:>17}",
-            "dest MAC", dest_mac, "source MAC", source_mac, "type", hrd_type
-        )
+        writeln!(f, "┌─────────────────┬───────────────────┐")?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "Field", "Value")?;
+        writeln!(f, "├─────────────────┼───────────────────┤")?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "dst MAC", dest_mac)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "src MAC", source_mac)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "type", hrd_type)?;
+        write!(f, "└─────────────────┴───────────────────┘")
     }
 }
 
 impl Eth_hdr {
-    pub fn new(dmac: MAC, smac: MAC, eth_type: u16) -> Self {
+    pub fn new(dmac: Mac, smac: Mac, eth_type: u16) -> Self {
         Eth_hdr {
             dmac: dmac.octets(),
             smac: smac.octets(),

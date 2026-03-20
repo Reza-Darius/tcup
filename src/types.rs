@@ -7,17 +7,17 @@ use tokio::sync::mpsc::Sender;
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Copy, Clone)]
-pub struct MAC([u8; 6]);
+pub struct Mac([u8; 6]);
 
-impl std::fmt::Display for MAC {
+impl std::fmt::Display for Mac {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", mac_to_str(&self.0))
     }
 }
 
-impl MAC {
+impl Mac {
     pub fn new(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8) -> Self {
-        MAC([a, b, c, d, e, f])
+        Mac([a, b, c, d, e, f])
     }
 
     pub fn octets(&self) -> [u8; 6] {
@@ -25,7 +25,7 @@ impl MAC {
     }
 
     pub fn from_octets(octets: [u8; 6]) -> Self {
-        MAC(octets)
+        Mac(octets)
     }
 
     /// supports "00:00:00:00:00:00" notation
@@ -44,21 +44,21 @@ impl MAC {
             return Err("invalid string for MAC conversiont".into());
         }
 
-        Ok(MAC(mac_parsed))
+        Ok(Mac(mac_parsed))
     }
 }
 
-impl From<[u8; 6]> for MAC {
+impl From<[u8; 6]> for Mac {
     fn from(value: [u8; 6]) -> Self {
-        MAC::from_octets(value)
+        Mac::from_octets(value)
     }
 }
 
 #[derive(Debug)]
 pub struct MockHost {
-    pub arp_table: HashMap<Ipv4Addr, MAC>,
+    pub arp_table: HashMap<Ipv4Addr, Mac>,
     pub addr: Ipv4Addr,
-    pub mac: MAC,
+    pub mac: Mac,
 
     pub port: u16,
 }
@@ -69,7 +69,7 @@ pub struct Socket {
 }
 
 impl MockHost {
-    pub fn new(ip: Ipv4Addr, mac: MAC, port: u16) -> Self {
+    pub fn new(ip: Ipv4Addr, mac: Mac, port: u16) -> Self {
         MockHost {
             arp_table: HashMap::new(),
             addr: ip,
@@ -78,7 +78,7 @@ impl MockHost {
         }
     }
 
-    pub fn get_mac(&self, ip: impl Into<Ipv4Addr>) -> Option<MAC> {
+    pub fn get_mac(&self, ip: impl Into<Ipv4Addr>) -> Option<Mac> {
         self.arp_table.get(&ip.into()).copied()
     }
 }

@@ -5,7 +5,7 @@ use crate::tcup::TCup;
 use crate::{
     error::Result,
     eth::{ETH_P_ARP, Eth_hdr, EthFrame},
-    types::{MAC, MockHost},
+    types::{Mac, MockHost},
     utils::mac_to_str,
 };
 use bytemuck::{Pod, Zeroable};
@@ -79,15 +79,28 @@ impl Display for ArpPacket {
             _ => unreachable!(),
         };
 
-        write!(f, "hw type: {hw_type}\nprotocol: {protocol}\nop: {op}\n")?;
+        let src_mac = mac_to_str(&self.smac);
+        let dst_mac = mac_to_str(&self.dmac);
+        let src_ip = Ipv4Addr::from_octets(self.sip);
+        let dst_ip = Ipv4Addr::from_octets(self.dip);
+
         write!(
             f,
-            "source mac: {}\nsource ip: {}\ntarget mac: {}\ntarget ip: {}\n",
-            mac_to_str(&self.smac),
-            Ipv4Addr::from_octets(self.sip),
-            mac_to_str(&self.dmac),
-            Ipv4Addr::from_octets(self.dip),
-        )
+            "\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n",
+            "hw type",
+            hw_type,
+            "protocol",
+            protocol,
+            "opcode",
+            op,
+            "src mac",
+            src_mac,
+            "src ip",
+            src_ip,
+            "dst mac",
+            dst_mac,
+        )?;
+        writeln!(f, "{:<15} {:>10}", "dst ip", dst_ip)
     }
 }
 
@@ -113,10 +126,10 @@ pub async fn handle_arp(mut inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost)
 }
 
 fn run_arp_check(mut arp: ArpPacket, host: &mut MockHost) -> Option<ArpPacket> {
-    let sender_mac = MAC::from_octets(arp.smac);
+    let sender_mac = Mac::from_octets(arp.smac);
     let sender_ip = Ipv4Addr::from_octets(arp.sip);
 
-    let target_mac = MAC::from_octets(arp.dmac);
+    let target_mac = Mac::from_octets(arp.dmac);
     let target_ip = Ipv4Addr::from_octets(arp.dip);
 
     if arp.hwtype != ARP_HRD_ETHER {

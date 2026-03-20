@@ -34,7 +34,7 @@ pub struct IP_hdr {
     pub frag_off: u16, // first 3 bits are flags, rest offset
     pub ttl: u8,       // time to live
     pub prot: u8,
-    pub checksum: u16,
+    pub checksum: u16, // only covers the IP header
 
     pub src_addr: [u8; 4],
     pub dest_addr: [u8; 4],
@@ -117,24 +117,17 @@ impl std::fmt::Display for IP_hdr {
         let src = Ipv4Addr::from_octets(self.src_addr);
         let dest = Ipv4Addr::from_octets(self.dest_addr);
 
-        write!(
-            f,
-            "\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n",
-            "version",
-            ver,
-            "total length",
-            tot,
-            "TTL",
-            ttl,
-            "protocol",
-            prot,
-            "checksum",
-            check,
-            "src addr",
-            src,
-            "dst addr",
-            dest
-        )
+        writeln!(f, "┌─────────────────┬───────────────────┐")?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "Field", "Value")?;
+        writeln!(f, "├─────────────────┼───────────────────┤")?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "version", ver)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "total length", tot)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "TTL", ttl)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "protocol", prot)?;
+        writeln!(f, "│ {:<15} │ {:#06x}            │", "checksum", check)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "src addr", src)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "dst addr", dest)?;
+        write!(f, "└─────────────────┴───────────────────┘")
     }
 }
 
@@ -143,7 +136,7 @@ pub async fn handle_ip_frame(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost
 
     let ip_hdr = check_ip_packet(eth_pay)?;
 
-    info!("handling IP packet {}", ip_hdr);
+    info!("handling IP packet\n{}", ip_hdr);
 
     if ip_hdr.dest_addr != host.addr.octets() {
         return Err("IP packet not directed at me".into());

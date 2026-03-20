@@ -12,15 +12,15 @@ use bytemuck::{Pod, Zeroable};
 use siphasher::sip::SipHasher13;
 use tokio::select;
 use tokio::sync::mpsc::{Receiver, channel};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::error::Result;
 use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_HDR_SIZE, ETH_P_IP, Eth_hdr};
 use crate::ip::{IP_DF, IP_HDR_MINSIZE, IP_hdr, IPPROTO_TCP, TOS_BEST_EFFORT, TTL_START};
 use crate::tcp::hdr::TCP_hdr;
 use crate::tcp::opts::TCP_opts;
-use crate::tcup::TCup;
-use crate::types::{MAC, Socket, TCPCon};
+use crate::tcup::{CLOCK, TCup};
+use crate::types::{Mac, Socket, TCPCon};
 use crate::{eth::EthFrame, types::MockHost};
 
 pub const TCP_HDR_MINSIZE: usize = 20;
@@ -68,8 +68,8 @@ impl SkCb {
             tcb: Tcb::default(),
 
             eth_hdr: Eth_hdr::new(
-                MAC::from_octets(eth_hdr.smac),
-                MAC::from_octets(eth_hdr.dmac),
+                Mac::from_octets(eth_hdr.smac),
+                Mac::from_octets(eth_hdr.dmac),
                 ETH_P_IP,
             ),
             con,
@@ -77,7 +77,7 @@ impl SkCb {
     }
 
     /// sends a packet through the open connection
-    async fn reply(&self, tcp_hdr: TCP_hdr, opts: Option<TCP_opts>, tcp_pay: &[u8]) -> Result<()> {
+    async fn reply(&self, tcp_hdr: TCP_hdr, opts: TCP_opts, tcp_pay: &[u8]) -> Result<()> {
         let ip_tot_len = IP_HDR_MINSIZE + tcp_hdr.len() + tcp_pay.len();
         let mut ip_hdr = IP_hdr {
             ver_ihl: 0,
@@ -88,17 +88,21 @@ impl SkCb {
             ttl: TTL_START,
             prot: IPPROTO_TCP,
             checksum: 0,
-            src_addr: self.con.sip.octets(),
-            dest_addr: self.con.dip.octets(),
+            src_addr: self.con.dip.octets(),
+            dest_addr: self.con.sip.octets(),
         };
 
         ip_hdr.set_ihl(IP_HDR_MINSIZE)?;
+
+        // debug!("ip tot len {}", ip_tot_len);
+        // debug!("tcp hdr len {}", tcp_hdr.len());
 
         let mut packet = EthFrame::with_cap(ETH_HDR_SIZE + ip_tot_len)?;
 
         packet.set_eth_hdr(self.eth_hdr);
         packet.set_ip_hdr(ip_hdr)?;
         packet.set_tcp_hdr(tcp_hdr)?;
+        packet.set_tcp_opts(opts)?;
         packet.set_tcp_pay(tcp_pay)?;
         packet.set_tcp_check(PseudoHdr::new(
             ip_hdr.src_addr,
@@ -107,12 +111,17 @@ impl SkCb {
         ))?;
         packet.set_ip_check()?;
 
+        info!("sending reply");
+        println!("reply ETH:\n{}", self.eth_hdr);
+        println!("reply IP:\n{}", ip_hdr);
+        println!("reply TCP:\n{}", tcp_hdr);
+
         // do we need a timeout?
         let n = self.snd_chan.write_tap(packet).await?;
 
         assert_eq!(n, ETH_HDR_SIZE + ip_hdr.tot_len as usize);
 
-        info!("{n} bytes written");
+        println!("{n} bytes written");
         Ok(())
     }
 }
@@ -134,6 +143,38 @@ pub struct Tcb {
     seg_ack: u32,
     seg_len: u32,
     seg_wnd: u32,
+}
+
+impl std::fmt::Display for Tcb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "\n{:<12} {:>10}\n{:<12} {:>10}\n{:<12} {:>10}\
+             \n{:<12} {:>10}\n{:<12} {:>10}\
+             \n{:<12} {:>10}\n{:<12} {:>10}\
+             \n{:<12} {:>10}\n{:<12} {:>10}\n{:<12} {:>10}",
+            "snd_una",
+            self.snd_una,
+            "snd_nxt",
+            self.snd_nxt,
+            "snd_wnd",
+            self.snd_wnd,
+            "rcv_nxt",
+            self.rcv_nxt,
+            "rcv_wnd",
+            self.rcv_wnd,
+            "iss",
+            self.iss,
+            "irs",
+            self.irs,
+            "seg_seq",
+            self.seg_seq,
+            "seg_ack",
+            self.seg_ack,
+            "seg_len",
+            self.seg_len,
+        )
+    }
 }
 
 impl Tcb {
@@ -216,6 +257,9 @@ impl PseudoHdr {
 }
 
 pub async fn handle_tcp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
+    // TODO: check tcp checksum
+    //
+    //
     let eth_hdr = inc.get_eth_hdr();
     let ip_hdr = inc.get_ip_hdr()?;
     let tcp_hdr = inc.get_tcp_hdr()?;
@@ -240,7 +284,7 @@ pub async fn handle_tcp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> 
             return Ok(());
         }
 
-        info!("new connection!");
+        info!("new SYN packet received!");
 
         // register new connection and spawn worker
         let (tx, rx) = channel::<EthFrame>(CHAN_BUF_SIZE);
@@ -257,6 +301,7 @@ pub async fn handle_tcp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> 
     }
 }
 
+#[instrument(skip_all, err)]
 async fn tcp_processing(inc: EthFrame, mut skcb: SkCb) -> Result<()> {
     loop {
         match skcb.status {
@@ -277,18 +322,21 @@ async fn handshake(inc: &EthFrame, skcb: &mut SkCb) -> Result<()> {
     let req_ip_hdr = inc.get_ip_hdr()?;
     let req_tcp_hdr = inc.get_tcp_hdr()?;
 
+    println!("req IP:\n{}", req_ip_hdr);
+    println!("req TCP:\n{}", req_tcp_hdr);
+
     // send off SYNACK
 
     skcb.tcb.iss = req_tcp_hdr.seq;
     skcb.tcb.irs = new_isn(&skcb.con);
 
     let mut tcp_hdr = TCP_hdr {
-        sport: skcb.con.sport,
-        dport: skcb.con.dport,
+        sport: skcb.con.dport,
+        dport: skcb.con.sport,
         seq: skcb.tcb.irs,
         ack: req_tcp_hdr.seq + 1,
         flags: TCPFlags::default(),
-        win_size: u16::MAX,
+        win_size: 10000,
         ..Default::default()
     };
 
@@ -301,22 +349,29 @@ async fn handshake(inc: &EthFrame, skcb: &mut SkCb) -> Result<()> {
     tcp_hdr.set_ack();
     tcp_hdr.set_len(TCP_HDR_MINSIZE + opts.len())?;
 
-    skcb.reply(tcp_hdr, Some(opts), &[]).await?;
+    skcb.reply(tcp_hdr, opts, &[]).await?;
 
     // wait for response or timeout
     select! {
         _ = tokio::time::sleep(Duration::new(10, 0)) =>  {
-            debug!("handshake timed out");
+            warn!("handshake timed out");
 
             skcb.status = TCPState::Closed;
             Ok(())
         }
-        Some(frame) = skcb.rcv_chan.recv() => {
-            info!("connection established!");
-            println!("SYNACK received!\n{}\n", frame.get_tcp_hdr()?);
+        Some(resp) = skcb.rcv_chan.recv() => {
+            println!("SYNACK received!\n{}\n", resp.get_tcp_hdr()?);
 
-            skcb.status = TCPState::Established;
-            Ok(())
+            // check ACK flag and seq
+            let resp_hdr = resp.get_tcp_hdr()?;
+            if resp_hdr.check_ack() && resp_hdr.ack == skcb.tcb.irs + 1 {
+                info!("connection established!");
+                // populate control block
+                skcb.status = TCPState::Established;
+                Ok(())
+            } else {
+                Err("handshake failes".into())
+            }
         }
     }
 }
@@ -327,12 +382,12 @@ fn parse_options(framge: EthFrame) -> Option<TCP_opts> {
 
 // TODO: implement 4 microsecond clock
 fn new_isn(con: &TCPCon) -> u32 {
-    let secret = "i love green tea!";
     let key: &[u8; 16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let mut hasher = SipHasher13::new_with_key(key);
 
-    time::UtcDateTime::now().hash(&mut hasher);
-    secret.hash(&mut hasher);
+    CLOCK
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .hash(&mut hasher);
     con.hash(&mut hasher);
 
     hasher.finish() as u32
