@@ -62,6 +62,10 @@ impl TCP_opts {
     pub fn from_be_bytes(mut tcp_opts: &[u8]) -> Result<Self> {
         let mut opts = TCP_opts::default();
 
+        if tcp_opts.is_empty() {
+            return Ok(opts);
+        }
+
         while !tcp_opts.is_empty() {
             match tcp_opts {
                 [OPT_EOL, ..] => return Ok(opts),

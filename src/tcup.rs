@@ -56,7 +56,7 @@ impl TCup {
             let n = tcup.read_tap(&mut *buf).await.unwrap();
             info!("{n} bytes received");
 
-            let frame = match EthFrame::new(&buf[..n]) {
+            let frame = match EthFrame::from_be_bytes(&buf[..n]) {
                 Ok(f) => f,
                 Err(e) => {
                     error!("failed to create frame");

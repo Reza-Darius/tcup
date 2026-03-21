@@ -85,6 +85,24 @@ impl TCP_hdr {
     pub fn check_synack(&self) -> bool {
         self.check_ack() && self.check_syn()
     }
+
+    pub fn check_fin(&self) -> bool {
+        self.flags & TCPFlags::FIN == TCPFlags::FIN
+    }
+
+    pub fn set_fin(&mut self) -> &mut Self {
+        self.flags |= TCPFlags::FIN;
+        self
+    }
+
+    pub fn check_rst(&self) -> bool {
+        self.flags & TCPFlags::RST == TCPFlags::RST
+    }
+
+    pub fn set_rst(&mut self) -> &mut Self {
+        self.flags |= TCPFlags::RST;
+        self
+    }
 }
 
 impl std::fmt::Display for TCP_hdr {
@@ -126,8 +144,8 @@ impl std::fmt::Display for TCP_hdr {
         writeln!(f, "├─────────────────┼───────────────────┤")?;
         writeln!(f, "│ {:<15} │ {:<17} │", "src port", sport)?;
         writeln!(f, "│ {:<15} │ {:<17} │", "dst port", dport)?;
-        writeln!(f, "│ {:<15} │ {:#010x}        │", "seq", seq)?;
-        writeln!(f, "│ {:<15} │ {:#010x}        │", "ack", ack)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "seq", seq)?;
+        writeln!(f, "│ {:<15} │ {:<17} │", "ack", ack)?;
         writeln!(f, "│ {:<15} │ {:<17} │", "header len", len)?;
         writeln!(f, "│ {:<15} │ {:<17} │", "window", win_size)?;
         writeln!(f, "│ {:<15} │ {:#06x}            │", "checksum", check)?;

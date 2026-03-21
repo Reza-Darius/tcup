@@ -58,7 +58,7 @@ pub struct EthFrame {
 }
 
 impl EthFrame {
-    pub fn new(data: &[u8]) -> Result<Self> {
+    pub fn from_be_bytes(data: &[u8]) -> Result<Self> {
         if data.len() > ETH_FRAME_MAX_SIZE {
             return Err("data exceeds MTU".into());
         }
@@ -72,7 +72,7 @@ impl EthFrame {
         })
     }
 
-    pub fn with_cap(cap: usize) -> Result<Self> {
+    fn with_cap(cap: usize) -> Result<Self> {
         if cap > ETH_FRAME_MAX_SIZE {
             return Err("data exceeds MTU".into());
         }
@@ -84,6 +84,34 @@ impl EthFrame {
         Ok(EthFrame {
             data: vec![0u8; cap],
         })
+    }
+
+    pub fn new_tcp(
+        eth_hdr: Eth_hdr,
+        ip_hdr: IP_hdr,
+        tcp_hdr: TCP_hdr,
+        tcp_opts: TCP_opts,
+        tcp_pay: &[u8],
+    ) -> Result<Self> {
+        let mut packet = EthFrame::with_cap(ETH_HDR_SIZE + ip_hdr.tot_len as usize)?;
+
+        packet.set_eth_hdr(eth_hdr);
+        packet.set_ip_hdr(ip_hdr)?;
+        packet.set_tcp_hdr(tcp_hdr)?;
+        packet.set_tcp_opts(tcp_opts)?;
+        packet.set_tcp_pay(tcp_pay)?;
+        packet.set_tcp_check(PseudoHdr::new(
+            ip_hdr.src_addr,
+            ip_hdr.dest_addr,
+            tcp_hdr.len() + tcp_pay.len(),
+        ))?;
+        packet.set_ip_check()?;
+
+        if packet.data.len() != ETH_HDR_SIZE + ip_hdr.len() + tcp_hdr.len() {
+            return Err("error when assembling frame: lengths dont match".into());
+        }
+
+        Ok(packet)
     }
 
     pub fn len(&self) -> usize {
