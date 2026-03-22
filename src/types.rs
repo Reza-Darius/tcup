@@ -66,6 +66,13 @@ pub struct MockHost {
 #[derive(Debug, Clone)]
 pub struct Socket {
     pub tx: Sender<EthFrame>,
+    // connection
+    // status
+}
+
+enum SocketStatus {
+    Closed,
+    Open(Box<crate::tcp::SkCb>),
 }
 
 impl MockHost {
