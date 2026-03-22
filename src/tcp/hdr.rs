@@ -1,7 +1,8 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::Result;
-use crate::tcp::{TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCPFlags};
+use crate::ip::IPPROTO_TCP;
+use crate::tcp::{TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_PSEUDOHDR_SIZE};
 
 #[derive(Debug, Clone, Copy, Pod, Zeroable, Default)]
 #[repr(C, packed)]
@@ -153,5 +154,59 @@ impl std::fmt::Display for TCP_hdr {
         writeln!(f, "├─────────────────┼───────────────────┤")?;
         writeln!(f, "│ {:<15} │ {:<17} │", "flags", active_flags.join(", "))?;
         write!(f, "└─────────────────┴───────────────────┘")
+    }
+}
+
+bitflags::bitflags! {
+    /// the 13th octet in the header can be used for direct lookup
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable, Default)]
+    #[repr(C)]
+    pub struct TCPFlags: u8 {
+        /// Congestion Window Reduced (C) is used for informing that the sender reduced its sending rate
+        const CWR = 0b10000000;
+        /// ECN Echo (E) informs that the sender received a congestion notification
+        const ECE = 0b01000000;
+        /// Urgent Pointer (U) indicates that the segment contains prioritized dat
+        const URG = 0b00100000;
+        /// ACK (A) field is used to communicate the state of the TCP handshake. It stays on for the remainder of the connection.
+        const ACK = 0b00010000;
+        /// PSH (P) is used to indicate that the receiver should “push” the data to the application as soon as possible.
+        const PSH = 0b00001000;
+        /// RST (R) resets the TCP connection
+        const RST = 0b00000100;
+        /// SYN (S) is used to synchronize sequence numbers in the initial handshake
+        const SYN = 0b00000010;
+        /// FIN (F) indicates that the sender has finished sending data
+        const FIN = 0b00000001;
+
+        /// Union of SYN and ACK field
+        const SYNACK = Self::SYN.bits() | Self::ACK.bits();
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C, packed)]
+pub struct PseudoHdr {
+    pub src_addr: [u8; 4],
+    pub dest_addr: [u8; 4],
+
+    res: u8,      // zero
+    prot: u8,     // IPPROTO_TCP = 6
+    tcp_len: u16, // TCP segment length
+}
+
+impl PseudoHdr {
+    pub fn new(src_addr: [u8; 4], dest_addr: [u8; 4], tcp_len: usize) -> Self {
+        PseudoHdr {
+            src_addr,
+            dest_addr,
+            res: 0,
+            prot: IPPROTO_TCP,
+            tcp_len: tcp_len as u16,
+        }
+    }
+    pub fn into_be_bytes(mut self) -> [u8; TCP_PSEUDOHDR_SIZE] {
+        self.tcp_len = self.tcp_len.to_be();
+        bytemuck::cast(self)
     }
 }

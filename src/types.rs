@@ -72,7 +72,7 @@ pub struct Socket {
 
 enum SocketStatus {
     Closed,
-    Open(Box<crate::tcp::SkCb>),
+    Open(Box<crate::tcp::skcb::SkCb>),
 }
 
 impl MockHost {

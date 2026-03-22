@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use tracing::{debug, instrument};
+use tracing::instrument;
 
 use crate::arp::handle_arp;
 use crate::error::Result;
 use crate::ip::{IP_HDR_MAXSIZE, IP_HDR_MINSIZE, IP_hdr, handle_ip_frame};
 use crate::tcp::TCP_OPT_MAX_SIZE;
 use crate::tcp::{
-    PseudoHdr, TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_PSEUDOHDR_SIZE, hdr::TCP_hdr, opts::TCP_opts,
+    TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_PSEUDOHDR_SIZE, hdr::PseudoHdr, hdr::TCP_hdr,
+    opts::TCP_opts,
 };
 use crate::tcup::TCup;
 use crate::types::{Mac, MockHost};
