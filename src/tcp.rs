@@ -67,6 +67,7 @@ pub async fn handle_tcp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> 
 
     let sock = tcup.con_table.read().get(&con).cloned();
 
+    // TODO: refactor all this
     if let Some(sock) = sock {
         // hand off frame
         info!("handing off packet to connection");
@@ -99,15 +100,15 @@ pub async fn handle_tcp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> 
 #[instrument(skip_all, err)]
 async fn tcp_processing(tcup: Arc<TCup>, mut skcb: SkCb) -> Result<()> {
     loop {
-        match skcb.status {
+        let _ = match skcb.status {
             TCPState::SynSent => todo!(),
-            TCPState::SynReceived => syn_received(&mut skcb).await?,
-            TCPState::Established => established(&mut skcb).await?,
+            TCPState::SynReceived => syn_received(&mut skcb).await,
+            TCPState::Established => established(&mut skcb).await,
             TCPState::FinWait1 => todo!(),
             TCPState::FinWait2 => todo!(),
-            TCPState::CloseWait => close_wait(&mut skcb).await?,
+            TCPState::CloseWait => close_wait(&mut skcb).await,
             TCPState::Closing => todo!(),
-            TCPState::LastAck => last_ack(&mut skcb).await?,
+            TCPState::LastAck => last_ack(&mut skcb).await,
             TCPState::Listen => todo!(),
 
             TCPState::Closed => break,
@@ -115,6 +116,14 @@ async fn tcp_processing(tcup: Arc<TCup>, mut skcb: SkCb) -> Result<()> {
     }
     skcb.close_socket().await;
     Ok(())
+}
+
+async fn event_listener() {
+    /*
+     *  listen to event
+     *  record event in skcb
+     *  dispatch function based on state
+     */
 }
 
 /*
@@ -148,8 +157,9 @@ async fn syn_received(skcb: &mut SkCb) -> Result<()> {
     skcb.tcb.irs = skcb.tcb.seg_seq;
 
     // building SYN ACK response
-    // SYN consumes 1 seq number!
+    // SYN consumes 1 seq number! seg_len = 1
     skcb.tcb.rcv_nxt = skcb.tcb.seg_seq + 1;
+    skcb.tcb.rcv_wnd = WND_SIZE as u32;
 
     skcb.tcb.snd_una = skcb.tcb.iss;
     skcb.tcb.snd_nxt = skcb.tcb.iss + 1;
@@ -175,7 +185,7 @@ async fn syn_received(skcb: &mut SkCb) -> Result<()> {
     tcp_hdr.set_ack();
     tcp_hdr.set_len(TCP_HDR_MINSIZE + opts.len())?;
 
-    skcb.reply(tcp_hdr, opts, &[]).await?;
+    skcb.send(tcp_hdr, opts, &[]).await?;
 
     let mut rto = RTO_START;
     let mut retries = 0;
@@ -190,12 +200,12 @@ async fn syn_received(skcb: &mut SkCb) -> Result<()> {
                 _ = tokio::time::sleep(Duration::from_secs(rto)) =>  {
                     rto <<= 1;
 
-                    skcb.reply(tcp_hdr, opts, &[]).await?;
+                    skcb.send(tcp_hdr, opts, &[]).await?;
                     retries += 1;
                     continue;
                 }
 
-                r = skcb.listen() => {
+                r = skcb.receive() => {
                     let resp = r?;
 
                     if !skcb.acc_seg() {
@@ -212,7 +222,7 @@ async fn syn_received(skcb: &mut SkCb) -> Result<()> {
                         tcp_hdr.set_ack();
                         tcp_hdr.set_len(TCP_HDR_MINSIZE)?;
 
-                        skcb.reply(tcp_hdr, TCP_opts::default(), &[]).await?;
+                        skcb.send(tcp_hdr, TCP_opts::default(), &[]).await?;
 
                         return Err("invalid segment, state: syn_received".into());
                     }
@@ -233,10 +243,11 @@ async fn syn_received(skcb: &mut SkCb) -> Result<()> {
                         return Err("no ACK set, status: syn_received, terminating connection".into());
                     }
 
-                    if seq_lte(skcb.tcb.snd_una, skcb.tcb.seg_ack) && seq_lte(skcb.tcb.seg_ack, skcb.tcb.snd_nxt) {
+                    if seq_lt(skcb.tcb.snd_una, skcb.tcb.seg_ack) && seq_lte(skcb.tcb.seg_ack, skcb.tcb.snd_nxt) {
                         // ACK packets dont carry data so the windows doesnt advance
                         skcb.tcb.snd_wnd = skcb.tcb.seg_wnd as u32;
-                        skcb.tcb.rcv_wnd = WND_SIZE as u32;
+                        skcb.tcb.snd_wl1 = skcb.tcb.seg_seq;
+                        skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
                         skcb.tcb.snd_opts = skcb.msg.get_tcp_opts()?;
 
                         info!("connection established!");
@@ -257,7 +268,7 @@ async fn syn_received(skcb: &mut SkCb) -> Result<()> {
                         tcp_hdr.set_rst();
                         tcp_hdr.set_len(TCP_HDR_MINSIZE)?;
 
-                        skcb.reply(tcp_hdr, TCP_opts::default(), &[]).await?;
+                        skcb.send(tcp_hdr, TCP_opts::default(), &[]).await?;
 
                         continue;
                     }
@@ -274,7 +285,7 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
         skcb.con.sip, skcb.con.sport
     );
 
-    let resp = skcb.listen().await?;
+    let resp = skcb.receive().await?;
 
     if !skcb.acc_seg() && !resp.check_rst() {
         let mut tcp_hdr = TCP_hdr {
@@ -290,7 +301,7 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
         tcp_hdr.set_ack();
         tcp_hdr.set_len(TCP_HDR_MINSIZE)?;
 
-        skcb.reply(tcp_hdr, TCP_opts::default(), &[]).await?;
+        skcb.send(tcp_hdr, TCP_opts::default(), &[]).await?;
 
         return Err("err: segment wasnt acceptable, status: established".into());
     }
@@ -314,7 +325,12 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
     // shorthand variables
     let snd_una = skcb.tcb.snd_una;
     let seg_ack = skcb.tcb.seg_ack;
+    let seg_seq = skcb.tcb.seg_seq;
     let snd_nxt = skcb.tcb.snd_nxt;
+
+    if seq_lte(seg_ack, snd_una) {
+        return Err("duplicate ack received, returning...".into());
+    }
 
     if seq_lt(snd_una, seg_ack) && seq_lte(seg_ack, snd_nxt) {
         // the sequences was acknowledged within our send window
@@ -337,23 +353,19 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
         tcp_hdr.set_ack();
         tcp_hdr.set_len(TCP_HDR_MINSIZE)?;
 
-        skcb.reply(tcp_hdr, TCP_opts::default(), &[]).await?;
+        skcb.send(tcp_hdr, TCP_opts::default(), &[]).await?;
 
         return Err("ACK for unseen segment received".into());
     }
-    // TODO: update window
-    /*
-    If SND.UNA < SEG.ACK =< SND.NXT, the send window should be
-    updated.  If (SND.WL1 < SEG.SEQ or (SND.WL1 = SEG.SEQ and
-    SND.WL2 =< SEG.ACK)), set SND.WND <- SEG.WND, set
-    SND.WL1 <- SEG.SEQ, and set SND.WL2 <- SEG.ACK.
 
-    Note that SND.WND is an offset from SND.UNA, that SND.WL1
-    records the sequence number of the last segment used to update
-    SND.WND, and that SND.WL2 records the acknowledgment number of
-    the last segment used to update SND.WND.  The check here
-    prevents using old segments to update the window.
-     */
+    // update window
+    if seq_lte(snd_una, seg_ack) && seq_lte(seg_ack, snd_nxt) && seq_lt(skcb.tcb.snd_wl1, seg_seq)
+        || (skcb.tcb.snd_wl1 == seg_seq && seq_lte(skcb.tcb.snd_wl2, seg_ack))
+    {
+        skcb.tcb.snd_wnd = skcb.tcb.seg_wnd as u32;
+        skcb.tcb.snd_wl1 = seg_seq;
+        skcb.tcb.snd_wl2 = seg_ack;
+    }
 
     // TODO: return SEND buffer
 
@@ -361,15 +373,25 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
 
     // seventh, process the segment text,
     let tcp_pay = skcb.msg.get_tcp_pay()?;
-    // we can advance the window here and write to the buffer
     info!("got {} bytes of data, advancing rcv_nxt", tcp_pay.len());
 
     skcb.snd_buf.extend_from_slice(tcp_pay);
     println!(
-        "\nsent via tcup: {}",
+        "\nsent via tcup:\n{}",
         str::from_utf8(skcb.snd_buf.as_slice()).unwrap()
     );
-    skcb.tcb.rcv_nxt += tcp_pay.len() as u32;
+
+    if skcb.tcb.seg_seq == skcb.tcb.rcv_nxt {
+        skcb.tcb.rcv_nxt += tcp_pay.len() as u32;
+    } else {
+        // TODO: out of order segments (duplicate acknowledgment)
+    }
+
+    // eighth, check the FIN bit,
+    if resp.check_fin() {
+        skcb.tcb.rcv_nxt += 1;
+        skcb.status = TCPState::CloseWait;
+    }
 
     let mut tcp_hdr = TCP_hdr {
         sport: skcb.con.dport,
@@ -384,14 +406,8 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
     tcp_hdr.set_ack();
     tcp_hdr.set_len(TCP_HDR_MINSIZE)?;
 
-    // TODO: retransmission queue
-    skcb.reply(tcp_hdr, TCP_opts::default(), &[]).await?;
-
-    // eighth, check the FIN bit,
-    if resp.check_fin() {
-        skcb.tcb.rcv_nxt += 1;
-        skcb.status = TCPState::CloseWait;
-    }
+    // TODO: retransmission queue if we sent data
+    skcb.send(tcp_hdr, TCP_opts::default(), &[]).await?;
 
     Ok(())
 }
@@ -405,7 +421,7 @@ async fn close_wait(skcb: &mut SkCb) -> Result<()> {
     //     return Ok(());
     // }
 
-    // ACKing their FIN and sending our own FIN
+    // sending our own FIN
     let mut tcp_hdr = TCP_hdr {
         sport: skcb.con.dport,
         dport: skcb.con.sport,
@@ -417,14 +433,13 @@ async fn close_wait(skcb: &mut SkCb) -> Result<()> {
     };
 
     // FIN takes one seq number
-    skcb.tcb.snd_una += 1;
     skcb.tcb.snd_nxt += 1;
 
-    tcp_hdr.set_ack();
     tcp_hdr.set_fin();
     tcp_hdr.set_len(TCP_HDR_MINSIZE)?;
 
-    skcb.reply(tcp_hdr, TCP_opts::default(), &[]).await?;
+    // TODO: requeue
+    skcb.send(tcp_hdr, TCP_opts::default(), &[]).await?;
 
     skcb.status = TCPState::LastAck;
     Ok(())
@@ -439,12 +454,10 @@ async fn last_ack(skcb: &mut SkCb) -> Result<()> {
             skcb.status = TCPState::Closed;
             return Ok(())
         }
-        r = skcb.listen() => {
+        r = skcb.receive() => {
             resp = r?;
         }
     };
-
-    let resp = skcb.listen().await?;
 
     if !skcb.acc_seg() && !resp.check_rst() {
         let mut tcp_hdr = TCP_hdr {
@@ -460,10 +473,10 @@ async fn last_ack(skcb: &mut SkCb) -> Result<()> {
         tcp_hdr.set_ack();
         tcp_hdr.set_len(TCP_HDR_MINSIZE)?;
 
-        skcb.reply(tcp_hdr, TCP_opts::default(), &[]).await?;
+        skcb.send(tcp_hdr, TCP_opts::default(), &[]).await?;
     }
 
-    if resp.ack == skcb.tcb.snd_nxt {
+    if skcb.acc_ack(&resp) {
         skcb.status = TCPState::Closed;
         Ok(())
     } else {

@@ -375,13 +375,16 @@ impl EthFrame {
     }
 
     pub fn get_tcp_pay(&self) -> Result<&[u8]> {
-        let offset = ETH_HDR_SIZE + self.iphdr_size() + self.tcphdr_size();
+        let ip_hdr = self.get_ip_hdr()?;
 
-        if offset > self.data.len() {
+        let lo = ETH_HDR_SIZE + self.iphdr_size() + self.tcphdr_size();
+        let hi = lo + ip_hdr.tot_len as usize - self.iphdr_size() - self.tcphdr_size();
+
+        if lo > self.data.len() || hi > self.data.len() {
             return Err("frame data is too small for requested TCP payload".into());
         }
 
-        Ok(&self.data.as_slice()[offset..])
+        Ok(&self.data.as_slice()[lo..hi])
     }
 
     /// overwrites the TCP payload with data

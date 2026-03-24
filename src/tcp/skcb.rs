@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,10 +20,11 @@ use crate::types::{Mac, TCPCon};
 pub struct SkCb {
     pub rcv_chan: Receiver<EthFrame>,
     pub rcv_buffer: Vec<u8>, // buffer for the output message
-    pub msg: EthFrame,       // the last message received on the connection
-
     pub snd_chan: Arc<TCup>,
-    pub snd_buf: Vec<u8>, // buffer for the output message
+    pub snd_buf: Vec<u8>, // buffer for the input message
+
+    pub msg: EthFrame, // the last message received on the connection
+    pub queue: TransmissionQueue,
 
     pub status: TCPState,
     pub tcb: Tcb,
@@ -44,9 +46,9 @@ impl SkCb {
             rcv_chan: rx,
             rcv_buffer: vec![],
             snd_chan: tcup,
-            msg: inc,
-
             snd_buf: vec![],
+            msg: inc,
+            queue: TransmissionQueue(VecDeque::new()),
             status: TCPState::Closed,
             tcb: Tcb::default(),
 
@@ -60,7 +62,7 @@ impl SkCb {
     }
 
     /// listens for a packet on the receiver
-    pub async fn listen(&mut self) -> Result<TCP_hdr> {
+    pub async fn receive(&mut self) -> Result<TCP_hdr> {
         let new_packet = if let Some(packet) = self.rcv_chan.recv().await {
             packet
         } else {
@@ -81,7 +83,7 @@ impl SkCb {
     }
 
     /// sends a packet through the open connection
-    pub async fn reply(&self, tcp_hdr: TCP_hdr, opts: TCP_opts, tcp_pay: &[u8]) -> Result<()> {
+    pub async fn send(&self, tcp_hdr: TCP_hdr, opts: TCP_opts, tcp_pay: &[u8]) -> Result<()> {
         let ip_tot_len = IP_HDR_MINSIZE + tcp_hdr.len() + tcp_pay.len();
 
         assert!(ip_tot_len >= IP_HDR_MINSIZE + TCP_HDR_MINSIZE);
@@ -108,7 +110,6 @@ impl SkCb {
         println!("reply IP:\n{}", packet.get_ip_hdr()?);
         println!("reply TCP:\n{}", packet.get_tcp_hdr()?);
 
-        // do we need a timeout?
         let n = self.snd_chan.write_tap(packet).await?;
 
         println!("{n} bytes written");
@@ -147,11 +148,11 @@ impl SkCb {
 
         tcp_hdr.set_len(TCP_HDR_MINSIZE)?;
 
-        self.reply(tcp_hdr, TCP_opts::default(), &[]).await
+        self.send(tcp_hdr, TCP_opts::default(), &[]).await
     }
 
     /// checks for acceptable ACK
-    fn acc_ack(&self, tcp_hdr: &TCP_hdr) -> bool {
+    pub fn acc_ack(&self, tcp_hdr: &TCP_hdr) -> bool {
         if !tcp_hdr.check_ack() {
             return true;
         }
@@ -223,6 +224,8 @@ pub struct Tcb {
     pub snd_una: u32, // unacknowledged data in flight
     pub snd_nxt: u32, // data that could be sent
     pub snd_wnd: u32, // window size (upper limit) = UNA + window size
+    pub snd_wl1: u32, // segment sequence number used for last window update
+    pub snd_wl2: u32, // segment acknowledgment number used for last window update
 
     pub rcv_nxt: u32, // next byte to receive
     pub rcv_wnd: u32, // future seq number not yet allowed (upper limit)
@@ -285,4 +288,32 @@ pub enum TCPState {
 
     #[default]
     Closed,
+}
+
+#[derive(Debug, Default)]
+pub struct TransmissionQueue(VecDeque<QEntry>);
+
+impl TransmissionQueue {
+    pub fn push(&mut self, elem: QEntry) {
+        self.0.push_back(elem);
+    }
+    pub fn pop(&mut self) -> Option<QEntry> {
+        self.0.pop_front()
+    }
+    pub fn peek(&self) -> Option<&QEntry> {
+        self.0.front()
+    }
+    pub fn match_front(&self, seg: u32) -> bool {
+        if let Some(elem) = self.peek() {
+            return elem.seg == seg;
+        }
+        false
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct QEntry {
+    pub seg: u32,
+    pub data: usize,
+    pub len: usize,
 }
