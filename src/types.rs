@@ -3,6 +3,7 @@ use std::{collections::HashMap, net::Ipv4Addr};
 use crate::error::Result;
 use crate::eth::EthFrame;
 use crate::utils::mac_to_str;
+use bincode::{Decode, Encode};
 use tokio::sync::mpsc::Sender;
 
 #[allow(clippy::upper_case_acronyms)]
@@ -63,18 +64,6 @@ pub struct MockHost {
     pub port: u16,
 }
 
-#[derive(Debug, Clone)]
-pub struct Socket {
-    pub tx: Sender<EthFrame>,
-    // connection
-    // status
-}
-
-enum SocketStatus {
-    Closed,
-    Open(Box<crate::tcp::skcb::SkCb>),
-}
-
 impl MockHost {
     pub fn new(ip: Ipv4Addr, mac: Mac, port: u16) -> Self {
         MockHost {
@@ -96,4 +85,24 @@ pub struct TCPCon {
     pub sport: u16,
     pub dip: Ipv4Addr,
     pub dport: u16,
+}
+
+pub struct SocketTable(HashMap<SocketId, Socket>);
+
+#[derive(Debug, Encode, Decode)]
+pub struct SocketId(i32);
+
+#[derive(Debug, Clone)]
+pub struct Socket {
+    pub tx: Sender<EthFrame>,
+    // // connection
+    // pub con: TCPCon,
+    // // status
+    // pub status: SocketStatus,
+}
+
+#[derive(Debug, Clone)]
+enum SocketStatus {
+    Closed,
+    Open,
 }

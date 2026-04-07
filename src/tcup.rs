@@ -44,11 +44,11 @@ impl TCup {
     }
 
     /// starts the main event loop
-    pub async fn listen(self, host: &mut MockHost) {
+    pub async fn run(self, host: &mut MockHost) {
         let mut buf = Box::new([0u8; ETH_FRAME_MAX_SIZE]);
         let tcup = Arc::new(self);
 
-        tokio::spawn(drive_clock());
+        start_clock();
 
         loop {
             println!("listening...");
@@ -59,7 +59,7 @@ impl TCup {
             let frame = match EthFrame::from_be_bytes(&buf[..n]) {
                 Ok(f) => f,
                 Err(e) => {
-                    error!("failed to create frame");
+                    error!(%e, "failed to create frame");
                     continue;
                 }
             };
@@ -85,10 +85,12 @@ impl TCup {
     // }
 }
 
-async fn drive_clock() {
-    let mut int = tokio::time::interval(Duration::new(INTERVAL, 0));
-    loop {
-        int.tick().await;
-        CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
+fn start_clock() {
+    tokio::spawn(async {
+        let mut int = tokio::time::interval(Duration::new(INTERVAL, 0));
+        loop {
+            int.tick().await;
+            CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
 }

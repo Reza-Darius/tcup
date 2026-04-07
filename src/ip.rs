@@ -139,10 +139,6 @@ pub async fn handle_ip_frame(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost
 
     info!("handling IP packet\n{}", ip_hdr);
 
-    if ip_hdr.dest_addr != host.addr.octets() {
-        return Err("IP packet not directed at me".into());
-    }
-
     match ip_hdr.prot {
         IPPROTO_ICMP => handle_icmp(inc, tcup, host).await,
         IPPROTO_TCP => handle_tcp(inc, tcup, host).await,

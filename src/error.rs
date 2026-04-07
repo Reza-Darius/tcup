@@ -12,6 +12,8 @@ pub enum Error {
     #[error("{0}")]
     Unknown(String),
     #[error("{0}")]
+    Socket(String),
+    #[error("{0}")]
     Ip(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),

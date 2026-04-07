@@ -11,7 +11,7 @@ use crate::{
 use bytemuck::{Pod, Zeroable};
 use tracing::info;
 
-use crate::eth::{ETH_P_IP, ETH_P_IPV6};
+use crate::eth::{ETH_HDR_SIZE, ETH_P_IP, ETH_P_IPV6, ETH_PAY_MIN_SIZE, IP_ADDR_LEN, MAC_ADDR_LEN};
 
 /* ARP protocol opcodes. */
 const ARPOP_REQUEST: u16 = 1;
@@ -20,6 +20,8 @@ const ARPOP_REPLY: u16 = 2;
 /* ARP protocol HARDWARE identifiers. */
 const ARP_HRD_ETHER: u16 = 1;
 const ARP_PACKET_SIZE: usize = 28;
+
+const ARP_BROADCAST_ADDR: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 
 #[derive(Default, Clone, Copy, Pod, Zeroable)]
 #[repr(C, packed)]
@@ -122,6 +124,35 @@ pub async fn handle_arp(mut inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost)
         let n = tcup.write_tap(inc).await?;
         println!("{n} bytes written");
     }
+    Ok(())
+}
+
+async fn arp_broadcast(tcup: &TCup, ip: Ipv4Addr, host: &MockHost) -> Result<()> {
+    const PADDING: usize = ETH_PAY_MIN_SIZE - ARP_PACKET_SIZE;
+    let mut buf = [0u8; ETH_HDR_SIZE + ARP_PACKET_SIZE + PADDING];
+
+    let arp = ArpPacket {
+        hwtype: ARP_HRD_ETHER,
+        prot_type: ETH_P_IP,
+        hwsize: MAC_ADDR_LEN as u8,
+        prosize: IP_ADDR_LEN as u8,
+        opcode: ARPOP_REQUEST,
+        smac: host.mac.octets(),
+        sip: host.addr.octets(),
+        dmac: [0, 0, 0, 0, 0, 0],
+        dip: ip.octets(),
+    };
+    let eth = Eth_hdr {
+        dmac: ARP_BROADCAST_ADDR,
+        smac: host.mac.octets(),
+        prot_type: ETH_P_ARP,
+    };
+
+    buf[..ETH_HDR_SIZE].copy_from_slice(&eth.into_be_bytes());
+    buf[ETH_HDR_SIZE..ETH_HDR_SIZE + ARP_PACKET_SIZE].copy_from_slice(&arp.into_be_bytes());
+
+    let frame = EthFrame::from_be_bytes(&buf)?;
+    tcup.write_tap(frame).await?;
     Ok(())
 }
 

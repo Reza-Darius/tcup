@@ -9,11 +9,13 @@ use crate::error::Result;
 use crate::eth::EthFrame;
 use crate::eth::{ETH_P_IP, Eth_hdr};
 use crate::ip::{IP_DF, IP_HDR_MINSIZE, IP_hdr, IPPROTO_TCP, TOS_BEST_EFFORT, TTL_START};
-use crate::tcp::hdr::TCP_hdr;
+use crate::tcp::hdr::{TCP_hdr, TCPFlags};
 use crate::tcp::opts::TCP_opts;
-use crate::tcp::{TCP_HDR_MINSIZE, TW, seq_lt, seq_lte, tcp_check};
+use crate::tcp::{TCP_HDR_MINSIZE, TW, WND_SIZE, seq_lt, seq_lte, tcp_check};
 use crate::tcup::TCup;
 use crate::types::{Mac, TCPCon};
+
+const RCV_BUF_SIZE: usize = 512 << 10; // 512 * 1024 = 512 KiB
 
 /// socket control block
 #[derive(Debug)]
@@ -34,17 +36,12 @@ pub struct SkCb {
 }
 
 impl SkCb {
-    pub fn new(
-        inc: EthFrame,
-        rx: Receiver<EthFrame>,
-        tcup: Arc<TCup>,
-        eth_hdr: Eth_hdr,
-        con: TCPCon,
-    ) -> Self {
-        // TODO: fixed buffer sizes
-        SkCb {
+    pub fn new(inc: EthFrame, rx: Receiver<EthFrame>, tcup: Arc<TCup>, con: TCPCon) -> Box<Self> {
+        let eth_hdr = inc.get_eth_hdr();
+
+        Box::new(SkCb {
             rcv_chan: rx,
-            rcv_buffer: vec![],
+            rcv_buffer: Vec::with_capacity(RCV_BUF_SIZE),
             snd_chan: tcup,
             snd_buf: vec![],
             msg: inc,
@@ -58,7 +55,7 @@ impl SkCb {
                 ETH_P_IP,
             ),
             con,
-        }
+        })
     }
 
     /// listens for a packet on the receiver
@@ -69,15 +66,20 @@ impl SkCb {
             return Err("channel unexpectedly closed".into());
         };
 
-        let inc_ip_hdr = new_packet.get_ip_hdr()?;
-        let inc_tcp_hdr = new_packet.get_tcp_hdr()?;
+        self.ingest_frame(new_packet)
+    }
+
+    /// updates the control block
+    pub fn ingest_frame(&mut self, eth: EthFrame) -> Result<TCP_hdr> {
+        let inc_ip_hdr = eth.get_ip_hdr()?;
+        let inc_tcp_hdr = eth.get_tcp_hdr()?;
 
         // checksum
-        tcp_check(inc_ip_hdr, new_packet.get_ip_pay()?);
+        tcp_check(inc_ip_hdr, eth.get_ip_pay()?);
 
         // populate control block
         self.update(&inc_ip_hdr, &inc_tcp_hdr);
-        self.msg = new_packet;
+        self.msg = eth;
 
         Ok(inc_tcp_hdr)
     }
@@ -114,6 +116,23 @@ impl SkCb {
 
         println!("{n} bytes written");
         Ok(())
+    }
+
+    /// sends a naked ack based on current control block values
+    pub async fn send_ack(&self) -> Result<()> {
+        let mut tcp_hdr = TCP_hdr {
+            sport: self.con.dport,
+            dport: self.con.sport,
+            seq: self.tcb.snd_nxt,
+            ack: self.tcb.rcv_nxt,
+            flags: TCPFlags::default(),
+            win_size: WND_SIZE,
+            ..Default::default()
+        };
+
+        tcp_hdr.set_ack();
+        tcp_hdr.set_len(TCP_HDR_MINSIZE)?;
+        self.send(tcp_hdr, TCP_opts::default(), &[]).await
     }
 
     pub async fn close_socket(&self) {
@@ -169,6 +188,7 @@ impl SkCb {
         self.tcb.seg_seq = tcp_hdr.seq;
         self.tcb.seg_ack = tcp_hdr.ack;
         self.tcb.seg_wnd = tcp_hdr.win_size;
+        self.tcb.last_seq = self.tcb.seg_seq + self.tcb.seg_len - 1;
 
         self.tcb.seg_len = ip_hdr.tot_len as u32 - ip_hdr.len() as u32 - tcp_hdr.len() as u32;
         if tcp_hdr.check_syn() {
@@ -230,13 +250,17 @@ pub struct Tcb {
     pub rcv_nxt: u32, // next byte to receive
     pub rcv_wnd: u32, // future seq number not yet allowed (upper limit)
 
-    pub iss: u32, // initial send sequence number
-    pub irs: u32, // initial receive sequence number
+    /// initial send sequence number
+    pub iss: u32,
+    /// initial receive sequence number
+    pub irs: u32,
 
     pub seg_seq: u32,
     pub seg_ack: u32,
     pub seg_len: u32,
     pub seg_wnd: u16,
+    /// last sequence number of a segment
+    pub last_seq: u32,
 
     pub snd_opts: TCP_opts,
     pub rcv_opts: TCP_opts,
@@ -289,6 +313,12 @@ pub enum TCPState {
     #[default]
     Closed,
 }
+
+/*
+ A segment on the retransmission queue is fully acknowledged if the sum of its sequence number and length is less than or equal to the acknowledgment value in the incoming segment.
+
+ Only segments that advance SND.NXT (i.e., consume sequence space) are tracked for retransmission.
+*/
 
 #[derive(Debug, Default)]
 pub struct TransmissionQueue(VecDeque<QEntry>);

@@ -81,13 +81,13 @@ impl TAPDevice {
 
     pub fn set_if_link(&self) -> Result<()> {
         println!("ip link set dev {} up", &self.name);
-        let cmd = Command::new("ip")
+        let output = Command::new("ip")
             .args(["link", "set", "dev", &self.name, "up"])
             .output()
             .expect("failed to execute command");
 
-        if !cmd.status.success() {
-            let err = String::from_utf8(cmd.stderr).unwrap();
+        if !output.status.success() {
+            let err = String::from_utf8(output.stderr).unwrap();
             return Err(crate::error::Error::Ip(err));
         }
         Ok(())
@@ -95,13 +95,13 @@ impl TAPDevice {
 
     pub fn set_if_route(&self, route: &str) -> Result<()> {
         println!("ip route add {} dev {}", route, &self.name);
-        let cmd = Command::new("ip")
+        let output = Command::new("ip")
             .args(["route", "add", route, "dev", &self.name])
             .output()
             .expect("failed to execute command");
 
-        if !cmd.status.success() {
-            let err = String::from_utf8(cmd.stderr).unwrap();
+        if !output.status.success() {
+            let err = String::from_utf8(output.stderr).unwrap();
             return Err(crate::error::Error::Ip(err));
         }
         Ok(())
@@ -109,13 +109,13 @@ impl TAPDevice {
 
     pub fn set_if_addr(&self, addr: &str) -> Result<()> {
         println!("ip addr add {} dev {} ", addr, &self.name);
-        let cmd = Command::new("ip")
+        let output = Command::new("ip")
             .args(["addr", "add", "dev", &self.name, "local", addr])
             .output()
             .expect("failed to execute command");
 
-        if !cmd.status.success() {
-            let err = String::from_utf8(cmd.stderr).unwrap();
+        if !output.status.success() {
+            let err = String::from_utf8(output.stderr).unwrap();
             return Err(crate::error::Error::Ip(err));
         }
         Ok(())

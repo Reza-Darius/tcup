@@ -8,31 +8,20 @@
 
 use std::net::Ipv4Addr;
 
-use crate::{
+use tcup::{
     error::Result,
     tcup::TCup,
     types::{Mac, MockHost},
 };
 
-mod arp;
-mod error;
-mod eth;
-mod icmp;
-mod ip;
-mod tap;
-mod tcp;
-mod tcup;
-mod types;
-mod utils;
-
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<_> = std::env::args().collect();
+
     tracing_subscriber::fmt()
         .with_target(false)
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-
-    // TODO: take command line arguments or env variables
 
     let if_name = "tcup";
     let if_addr = "10.0.0.1/24";
@@ -46,7 +35,7 @@ async fn main() -> Result<()> {
 
     let tcup = TCup::init(if_name, if_addr)?;
 
-    tcup.listen(&mut dummy_host).await;
+    tcup.run(&mut dummy_host).await;
 
     Ok(())
 

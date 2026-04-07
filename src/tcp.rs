@@ -14,7 +14,7 @@ use tokio::select;
 use tokio::sync::mpsc::channel;
 use tracing::{info, instrument, warn};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_PAY_MAX_SIZE};
 use crate::ip::{IP_HDR_MINSIZE, IP_hdr};
 use crate::tcp::hdr::{PseudoHdr, TCP_hdr, TCPFlags};
@@ -86,19 +86,19 @@ pub async fn handle_tcp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> 
         let (tx, rx) = channel::<EthFrame>(CHAN_BUF_SIZE);
         tcup.con_table.write().insert(con, Socket { tx });
 
-        let mut skcb = SkCb::new(inc, rx, tcup.clone(), eth_hdr, con);
+        let mut skcb = SkCb::new(inc, rx, tcup.clone(), con);
 
         // priming the TCP loops
         skcb.status = TCPState::SynReceived;
 
-        tokio::spawn(tcp_processing(tcup.clone(), skcb));
+        tokio::spawn(tcp_processing(skcb));
 
         Ok(())
     }
 }
 
 #[instrument(skip_all, err)]
-async fn tcp_processing(tcup: Arc<TCup>, mut skcb: SkCb) -> Result<()> {
+async fn tcp_processing(mut skcb: Box<SkCb>) -> Result<()> {
     loop {
         let _ = match skcb.status {
             TCPState::SynSent => todo!(),
@@ -124,6 +124,49 @@ async fn event_listener() {
      *  record event in skcb
      *  dispatch function based on state
      */
+}
+
+fn active_open(inc: EthFrame, tcup: Arc<TCup>) -> Result<()> {
+    let ip_hdr = inc.get_ip_hdr()?;
+
+    if !tcp_check(ip_hdr, inc.get_ip_pay()?) {
+        return Err("TCP checksum error".into());
+    }
+
+    let eth_hdr = inc.get_eth_hdr();
+    let tcp_hdr = inc.get_tcp_hdr()?;
+
+    let con = TCPCon {
+        sip: Ipv4Addr::from_octets(ip_hdr.src_addr),
+        sport: tcp_hdr.sport,
+        dip: Ipv4Addr::from_octets(ip_hdr.dest_addr),
+        dport: tcp_hdr.dport,
+    };
+
+    let sock = tcup.con_table.read().get(&con).cloned();
+
+    if sock.is_some() {
+        return Err(Error::Socket(
+            "attempting to active open on existing socket".to_string(),
+        ));
+    }
+
+    // register new connection and spawn worker
+    let (tx, rx) = channel::<EthFrame>(CHAN_BUF_SIZE);
+    tcup.con_table.write().insert(con, Socket { tx });
+
+    let mut skcb = SkCb::new(inc, rx, tcup.clone(), con);
+
+    // priming the TCP loops
+    skcb.status = TCPState::SynSent;
+
+    tokio::spawn(syn_sent(skcb));
+
+    Ok(())
+}
+
+async fn syn_sent(skcb: Box<SkCb>) -> Result<()> {
+    Ok(())
 }
 
 /*
@@ -191,7 +234,7 @@ async fn syn_received(skcb: &mut SkCb) -> Result<()> {
     let mut retries = 0;
 
     loop {
-        if rto == SYN_ACK_RETRIES {
+        if retries == SYN_ACK_RETRIES {
             skcb.status = TCPState::Listen;
             return Err("handshake timed out".into());
         }
@@ -250,6 +293,9 @@ async fn syn_received(skcb: &mut SkCb) -> Result<()> {
                         skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
                         skcb.tcb.snd_opts = skcb.msg.get_tcp_opts()?;
 
+                        // TODO:
+                        // If an MSS Option is not received at connection setup, TCP implementations MUST assume a default send MSS of 536 (576 - 40) for IPv4 or 1220 (1280 - 60) for IPv6 (MUST-15).
+
                         info!("connection established!");
                         skcb.status = TCPState::Established;
 
@@ -284,6 +330,8 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
         "listening on connection: {}:{}",
         skcb.con.sip, skcb.con.sport
     );
+
+    // TODO: react to SENC calls
 
     let resp = skcb.receive().await?;
 
@@ -372,6 +420,7 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
     // TODO: sixth, check URG
 
     // seventh, process the segment text,
+    // TODO: queue, RTO
     let tcp_pay = skcb.msg.get_tcp_pay()?;
     info!("got {} bytes of data, advancing rcv_nxt", tcp_pay.len());
 
@@ -393,6 +442,7 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
         skcb.status = TCPState::CloseWait;
     }
 
+    // building response
     let mut tcp_hdr = TCP_hdr {
         sport: skcb.con.dport,
         dport: skcb.con.sport,
@@ -411,6 +461,9 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
 
     Ok(())
 }
+
+async fn established_seg_arrives() {}
+async fn established_send() {}
 
 async fn close_wait(skcb: &mut SkCb) -> Result<()> {
     // let resp = skcb.msg_buf.get_tcp_hdr()?;

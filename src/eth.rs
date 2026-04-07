@@ -1,3 +1,4 @@
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
@@ -12,7 +13,7 @@ use crate::tcp::{
     opts::TCP_opts,
 };
 use crate::tcup::TCup;
-use crate::types::{Mac, MockHost};
+use crate::types::{Mac, MockHost, TCPCon};
 use crate::utils::{calc_checksum_be, mac_to_str};
 
 /*
@@ -25,7 +26,8 @@ use crate::utils::{calc_checksum_be, mac_to_str};
  */
 
 const FCS_SIZE: usize = 4;
-const MAC_ADDR_LEN: usize = 6;
+pub const MAC_ADDR_LEN: usize = 6;
+pub const IP_ADDR_LEN: usize = 6;
 pub const ETH_FRAME_MIN_SIZE: usize = ETH_HDR_SIZE + ETH_PAY_MIN_SIZE; // min size sans FCS
 pub const ETH_FRAME_MAX_SIZE: usize = ETH_PAY_MAX_SIZE + ETH_HDR_SIZE; // max size sans FCS
 pub const ETH_HDR_SIZE: usize = 14;
@@ -399,6 +401,19 @@ impl EthFrame {
         self.data.extend_from_slice(data);
 
         Ok(())
+    }
+
+    pub fn get_con(&self) -> Result<TCPCon> {
+        let ip_hdr = self.get_ip_hdr()?;
+        let tcp_hdr = self.get_tcp_hdr()?;
+
+        let con = TCPCon {
+            sip: Ipv4Addr::from_octets(ip_hdr.src_addr),
+            sport: tcp_hdr.sport,
+            dip: Ipv4Addr::from_octets(ip_hdr.dest_addr),
+            dport: tcp_hdr.dport,
+        };
+        Ok(con)
     }
 }
 
