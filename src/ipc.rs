@@ -2,12 +2,14 @@ use std::net::IpAddr;
 
 use bincode::{Decode, Encode, config};
 use tokio::io::AsyncReadExt;
-use tokio::net::{UnixListener, UnixSocket};
+use tokio::net::UnixListener;
 use tokio::select;
 use tracing::error;
 
 use crate::error::Result;
-use crate::types::SocketId;
+use crate::tcp::sock::SocketId;
+
+const IPC_MSG_BUF: usize = 512; // buffer for the ipc message loop
 
 #[derive(Debug, Encode, Decode)]
 pub enum TcupCall {
@@ -17,12 +19,12 @@ pub enum TcupCall {
     Close(SocketId),
 }
 
-pub fn setup_uds(addr: &str) -> Result<UnixListener> {
+pub fn setup_uds_sock(addr: &str) -> Result<UnixListener> {
     UnixListener::bind(addr).map_err(|e| e.into())
 }
 
 pub async fn ipc_loop(listener: &UnixListener) -> TcupCall {
-    let mut buf = [0u8; 512];
+    let mut buf = [0u8; IPC_MSG_BUF];
     let config = config::standard()
         .with_big_endian()
         .with_variable_int_encoding();

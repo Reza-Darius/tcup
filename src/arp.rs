@@ -107,7 +107,7 @@ impl Display for ArpPacket {
 }
 
 /// in case the ARP request was directed at us, it returns an appropiate response packet
-pub async fn handle_arp(mut inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
+pub async fn handle_arp(mut inc: EthFrame, tcup: TCup, host: &mut MockHost) -> Result<()> {
     info!("handling ARP\n");
 
     let arp_packet = ArpPacket::from_be_bytes(inc.get_eth_pay()[..ARP_PACKET_SIZE].try_into()?);

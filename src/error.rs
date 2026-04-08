@@ -16,6 +16,10 @@ pub enum Error {
     #[error("{0}")]
     Ip(String),
     #[error("{0}")]
+    Tcp(String),
+    #[error("{0}")]
+    Eth(String),
+    #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Caps(#[from] caps::errors::CapsError),

@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 use crate::arp::handle_arp;
 use crate::error::Result;
@@ -192,7 +192,11 @@ impl EthFrame {
         }
 
         // currently doesnt support IP options
-        assert_eq!(hdr.len(), IP_HDR_MINSIZE);
+        assert_eq!(
+            hdr.len(),
+            IP_HDR_MINSIZE,
+            "ip options arent supported currently"
+        );
 
         self.data.as_mut_slice()[lo..hi].copy_from_slice(&hdr.into_be_bytes());
 
@@ -215,7 +219,8 @@ impl EthFrame {
 
         assert_eq!(
             0,
-            calc_checksum_be(&self.data[ETH_HDR_SIZE..ETH_HDR_SIZE + self.iphdr_size()])
+            calc_checksum_be(&self.data[ETH_HDR_SIZE..ETH_HDR_SIZE + self.iphdr_size()]),
+            "checksum failed"
         );
 
         Ok(())
@@ -308,7 +313,10 @@ impl EthFrame {
             .into());
         }
 
-        assert!(opts.len() <= TCP_OPT_MAX_SIZE);
+        assert!(
+            opts.len() <= TCP_OPT_MAX_SIZE,
+            "tcp options cant exceed opt max size"
+        );
 
         self.data.as_mut_slice()[lo..hi].copy_from_slice(&opts);
 
@@ -454,6 +462,7 @@ impl Eth_hdr {
             prot_type: eth_type,
         }
     }
+
     /// from network order bytes
     pub fn from_be_bytes(buf: &[u8; ETH_HDR_SIZE]) -> Self {
         let mut hdr: Eth_hdr = bytemuck::cast(*buf);
@@ -469,11 +478,11 @@ impl Eth_hdr {
 }
 
 #[instrument(skip_all, err)]
-pub async fn handle_frame(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
+pub async fn handle_frame(inc: EthFrame, tcup: TCup, host: &mut MockHost) -> Result<()> {
     let hdr = inc.get_eth_hdr();
-    println!("{}", hdr);
+    debug!("handling eth frame {:?}", hdr);
 
-    // TODO: discard incoming frame if its not directed at us
+    // TODO: handle ip datagrams not directed at us
 
     match hdr.prot_type {
         ETH_P_IP => {

@@ -1,28 +1,31 @@
 pub mod hdr;
+pub mod heap;
 pub mod opts;
 pub mod skcb;
 pub mod sock;
+pub mod timer;
 
 use core::hash::Hasher;
 use std::hash::Hash;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use siphasher::sip::SipHasher13;
 use tokio::select;
 use tokio::sync::mpsc::channel;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
-use crate::error::{Error, Result};
 use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_PAY_MAX_SIZE};
 use crate::ip::{IP_HDR_MINSIZE, IP_hdr};
 use crate::tcp::hdr::{PseudoHdr, TCP_hdr, TCPFlags};
 use crate::tcp::opts::TCP_opts;
 use crate::tcp::skcb::{SkCb, TCPState};
-use crate::tcup::{CLOCK, TCup};
-use crate::types::{Socket, TCPCon};
+use crate::tcp::sock::Socket;
+use crate::tcp::timer::*;
+use crate::tcup::TCup;
+use crate::types::TCPCon;
 use crate::utils::calc_checksum_be;
+use crate::{Error, Result};
 use crate::{eth::EthFrame, types::MockHost};
 
 pub const TCP_HDR_MINSIZE: usize = 20;
@@ -32,23 +35,10 @@ pub const TCP_OPT_MAX_SIZE: usize = TCP_HDR_MAXSIZE - TCP_HDR_MINSIZE;
 pub const WRD_SIZE: usize = 4;
 pub const WND_SIZE: u16 = 10000;
 
-/// Retransmission timeout, how long to wait for an ACK before resending the segment in seconds
-///
-/// double on each retry
-pub const RTO_START: u64 = 1;
-pub const RTO_CAP: u64 = 60;
-
-/// After sending the final FIN+ACK, you must linger before fully closing the socket. Prevents old duplicate segments from a dead connection being mistaken for a new one.
-pub const TW: u64 = MSL * 2;
-
-/// Maximum segment lifetime
-pub const MSL: u64 = 60;
-pub const FIN_TIMEOUT: u64 = 60;
+pub const CHAN_BUF_SIZE: usize = ETH_FRAME_MAX_SIZE * 10;
 pub const SYN_ACK_RETRIES: u64 = 5;
 
-pub const CHAN_BUF_SIZE: usize = ETH_FRAME_MAX_SIZE * 10;
-
-pub async fn handle_tcp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
+pub async fn handle_tcp(inc: EthFrame, tcup: TCup, host: &mut MockHost) -> Result<()> {
     let ip_hdr = inc.get_ip_hdr()?;
 
     if !tcp_check(ip_hdr, inc.get_ip_pay()?) {
@@ -65,7 +55,7 @@ pub async fn handle_tcp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> 
         dport: tcp_hdr.dport,
     };
 
-    let sock = tcup.con_table.read().get(&con).cloned();
+    let sock = tcup.get_sock(&con);
 
     // TODO: refactor all this
     if let Some(sock) = sock {
@@ -84,24 +74,27 @@ pub async fn handle_tcp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> 
 
         // register new connection and spawn worker
         let (tx, rx) = channel::<EthFrame>(CHAN_BUF_SIZE);
-        tcup.con_table.write().insert(con, Socket { tx });
+        tcup.insert_sock(&con, Socket { tx });
 
         let mut skcb = SkCb::new(inc, rx, tcup.clone(), con);
 
         // priming the TCP loops
         skcb.status = TCPState::SynReceived;
 
-        tokio::spawn(tcp_processing(skcb));
+        tokio::spawn(tcp_input(skcb));
 
         Ok(())
     }
 }
 
+/// main TCP loop running on a dedicated tokio task
 #[instrument(skip_all, err)]
-async fn tcp_processing(mut skcb: Box<SkCb>) -> Result<()> {
+async fn tcp_input(mut skcb: Box<SkCb>) -> Result<()> {
     loop {
+        // TODO: listen on receiver for events then go into state functions
+
         let _ = match skcb.status {
-            TCPState::SynSent => todo!(),
+            TCPState::SynSent => syn_sent(&mut skcb).await,
             TCPState::SynReceived => syn_received(&mut skcb).await,
             TCPState::Established => established(&mut skcb).await,
             TCPState::FinWait1 => todo!(),
@@ -118,54 +111,79 @@ async fn tcp_processing(mut skcb: Box<SkCb>) -> Result<()> {
     Ok(())
 }
 
-async fn event_listener() {
-    /*
-     *  listen to event
-     *  record event in skcb
-     *  dispatch function based on state
-     */
+async fn seg_handoff(inc: EthFrame, con: TCPCon, tcup: TCup) -> Result<()> {
+    let sock = tcup.get_sock(&con);
+
+    match sock {
+        Some(sock) => sock.tx.send(inc).await.map_err(Into::into),
+        None => todo!(),
+    }
 }
 
-fn active_open(inc: EthFrame, tcup: Arc<TCup>) -> Result<()> {
-    let ip_hdr = inc.get_ip_hdr()?;
-
-    if !tcp_check(ip_hdr, inc.get_ip_pay()?) {
-        return Err("TCP checksum error".into());
-    }
-
-    let eth_hdr = inc.get_eth_hdr();
-    let tcp_hdr = inc.get_tcp_hdr()?;
-
-    let con = TCPCon {
-        sip: Ipv4Addr::from_octets(ip_hdr.src_addr),
-        sport: tcp_hdr.sport,
-        dip: Ipv4Addr::from_octets(ip_hdr.dest_addr),
-        dport: tcp_hdr.dport,
-    };
-
-    let sock = tcup.con_table.read().get(&con).cloned();
+fn register_socket(inc: EthFrame, con: TCPCon, tcup: TCup) -> Result<Box<SkCb>> {
+    let sock = tcup.get_sock(&con);
 
     if sock.is_some() {
         return Err(Error::Socket(
-            "attempting to active open on existing socket".to_string(),
+            "attempting to register existing socket".to_string(),
         ));
     }
 
-    // register new connection and spawn worker
     let (tx, rx) = channel::<EthFrame>(CHAN_BUF_SIZE);
-    tcup.con_table.write().insert(con, Socket { tx });
+    tcup.insert_sock(&con, Socket { tx });
 
-    let mut skcb = SkCb::new(inc, rx, tcup.clone(), con);
+    Ok(SkCb::new(inc, rx, tcup.clone(), con))
+}
 
-    // priming the TCP loops
-    skcb.status = TCPState::SynSent;
-
-    tokio::spawn(syn_sent(skcb));
+fn listen(mut skcb: Box<SkCb>) -> Result<()> {
+    skcb.status = TCPState::Listen;
+    tokio::spawn(tcp_input(skcb));
 
     Ok(())
 }
 
-async fn syn_sent(skcb: Box<SkCb>) -> Result<()> {
+async fn active_open(mut skcb: Box<SkCb>) -> Result<()> {
+    // configure initial sequence numbers
+    skcb.tcb.iss = new_isn(&skcb.con);
+    skcb.tcb.irs = 0;
+
+    // building SYN packet
+    // SYN consumes 1 seq number! seg_len = 1
+    skcb.tcb.rcv_nxt = 0;
+    skcb.tcb.rcv_wnd = 0;
+
+    skcb.tcb.snd_una = skcb.tcb.iss;
+    skcb.tcb.snd_nxt = skcb.tcb.iss + 1;
+
+    let mut tcp_hdr = TCP_hdr {
+        sport: skcb.con.dport,
+        dport: skcb.con.sport,
+        seq: skcb.tcb.iss,
+        ack: 0,
+        flags: TCPFlags::default(),
+        win_size: WND_SIZE,
+        ..Default::default()
+    };
+
+    let opts = TCP_opts {
+        mss: Some(1460),
+        ..Default::default()
+    };
+
+    skcb.tcb.rcv_opts = opts;
+
+    tcp_hdr.set_syn();
+    tcp_hdr.set_len(TCP_HDR_MINSIZE + opts.len())?;
+
+    skcb.send(tcp_hdr, opts, &[]).await?;
+
+    skcb.status = TCPState::SynSent;
+    tokio::spawn(tcp_input(skcb));
+
+    Ok(())
+}
+
+async fn syn_sent(skcb: &mut SkCb) -> Result<()> {
     Ok(())
 }
 
@@ -186,7 +204,9 @@ async fn syn_sent(skcb: Box<SkCb>) -> Result<()> {
 
                               Figure 7.
 */
+
 // TODO: seperate LISTEN from SYN RECEIVED state
+#[instrument(fields(state = ?skcb.status))]
 async fn syn_received(skcb: &mut SkCb) -> Result<()> {
     let req_ip_hdr = skcb.msg.get_ip_hdr()?;
     let req_tcp_hdr = skcb.msg.get_tcp_hdr()?;
@@ -324,6 +344,7 @@ async fn syn_received(skcb: &mut SkCb) -> Result<()> {
     }
 }
 
+#[instrument(fields(state = ?skcb.status))]
 async fn established(skcb: &mut SkCb) -> Result<()> {
     // listen for new packets
     info!(
@@ -421,17 +442,17 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
 
     // seventh, process the segment text,
     // TODO: queue, RTO
-    let tcp_pay = skcb.msg.get_tcp_pay()?;
-    info!("got {} bytes of data, advancing rcv_nxt", tcp_pay.len());
+    let seg_data = skcb.msg.get_tcp_pay()?;
+    info!("got {} bytes of data, advancing rcv_nxt", seg_data.len());
 
-    skcb.snd_buf.extend_from_slice(tcp_pay);
+    skcb.snd_buf.extend_from_slice(seg_data);
     println!(
         "\nsent via tcup:\n{}",
         str::from_utf8(skcb.snd_buf.as_slice()).unwrap()
     );
 
     if skcb.tcb.seg_seq == skcb.tcb.rcv_nxt {
-        skcb.tcb.rcv_nxt += tcp_pay.len() as u32;
+        skcb.tcb.rcv_nxt += skcb.tcb.seg_len
     } else {
         // TODO: out of order segments (duplicate acknowledgment)
     }
@@ -465,6 +486,7 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
 async fn established_seg_arrives() {}
 async fn established_send() {}
 
+#[instrument(fields(state = ?skcb.status))]
 async fn close_wait(skcb: &mut SkCb) -> Result<()> {
     // let resp = skcb.msg_buf.get_tcp_hdr()?;
     // if resp.check_rst() {
@@ -498,6 +520,7 @@ async fn close_wait(skcb: &mut SkCb) -> Result<()> {
     Ok(())
 }
 
+#[instrument(fields(state = ?skcb.status))]
 async fn last_ack(skcb: &mut SkCb) -> Result<()> {
     // waiting for our FIN to be ACKed before closing
     let resp: TCP_hdr;
@@ -542,15 +565,14 @@ fn new_isn(con: &TCPCon) -> u32 {
     let key: &[u8; 16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let mut hasher = SipHasher13::new_with_key(key);
 
-    CLOCK
-        .load(std::sync::atomic::Ordering::Relaxed)
+    TICK.load(std::sync::atomic::Ordering::Relaxed)
         .hash(&mut hasher);
     con.hash(&mut hasher);
 
     hasher.finish() as u32
 }
 
-/// validates TCP checksum
+/// returns true on valid checksum
 fn tcp_check(ip_hdr: IP_hdr, ip_pay: &[u8]) -> bool {
     if ip_hdr.tot_len as usize > ETH_PAY_MAX_SIZE - IP_HDR_MINSIZE {
         return false;

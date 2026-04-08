@@ -488,6 +488,7 @@ dependencies = [
  "bincode",
  "bitflags",
  "bytemuck",
+ "bytes",
  "caps",
  "dashmap",
  "libc",

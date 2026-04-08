@@ -95,7 +95,7 @@ impl Unreachable {
     }
 }
 
-pub async fn handle_icmp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
+pub async fn handle_icmp(inc: EthFrame, tcup: TCup, host: &mut MockHost) -> Result<()> {
     let ip_payload = inc.get_ip_pay()?;
 
     if ip_payload.len() < ICMP_HDR_SIZE {
@@ -114,7 +114,7 @@ pub async fn handle_icmp(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) ->
     }
 }
 
-async fn handle_echo_req(req: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
+async fn handle_echo_req(req: EthFrame, tcup: TCup, host: &mut MockHost) -> Result<()> {
     info!("handling echo request");
 
     let req_ip_hdr = req.get_ip_hdr()?;

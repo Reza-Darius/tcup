@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::fmt::Display;
 use std::time::Duration;
 
 use tokio::sync::mpsc::Receiver;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::eth::EthFrame;
 use crate::eth::{ETH_P_IP, Eth_hdr};
 use crate::ip::{IP_DF, IP_HDR_MINSIZE, IP_hdr, IPPROTO_TCP, TOS_BEST_EFFORT, TTL_START};
@@ -21,12 +21,14 @@ const RCV_BUF_SIZE: usize = 512 << 10; // 512 * 1024 = 512 KiB
 #[derive(Debug)]
 pub struct SkCb {
     pub rcv_chan: Receiver<EthFrame>,
+    // TODO: out of order, and in order buffer
     pub rcv_buffer: Vec<u8>, // buffer for the output message
-    pub snd_chan: Arc<TCup>,
+
+    pub snd_chan: TCup,
     pub snd_buf: Vec<u8>, // buffer for the input message
+    pub rt_queue: TransmissionQueue,
 
     pub msg: EthFrame, // the last message received on the connection
-    pub queue: TransmissionQueue,
 
     pub status: TCPState,
     pub tcb: Tcb,
@@ -36,7 +38,7 @@ pub struct SkCb {
 }
 
 impl SkCb {
-    pub fn new(inc: EthFrame, rx: Receiver<EthFrame>, tcup: Arc<TCup>, con: TCPCon) -> Box<Self> {
+    pub fn new(inc: EthFrame, rx: Receiver<EthFrame>, tcup: TCup, con: TCPCon) -> Box<Self> {
         let eth_hdr = inc.get_eth_hdr();
 
         Box::new(SkCb {
@@ -45,7 +47,7 @@ impl SkCb {
             snd_chan: tcup,
             snd_buf: vec![],
             msg: inc,
-            queue: TransmissionQueue(VecDeque::new()),
+            rt_queue: TransmissionQueue(VecDeque::new()),
             status: TCPState::Closed,
             tcb: Tcb::default(),
 
@@ -107,14 +109,16 @@ impl SkCb {
 
         let packet = EthFrame::new_tcp(self.eth_hdr, ip_hdr, tcp_hdr, opts, tcp_pay)?;
 
-        info!("sending reply");
-        println!("reply ETH:\n{}", packet.get_eth_hdr());
-        println!("reply IP:\n{}", packet.get_ip_hdr()?);
-        println!("reply TCP:\n{}", packet.get_tcp_hdr()?);
+        debug!(
+            "sending frame:\nETH:\nIP:{}\nTCP:{}\n{}\n",
+            packet.get_eth_hdr(),
+            packet.get_ip_hdr()?,
+            packet.get_tcp_hdr()?
+        );
 
         let n = self.snd_chan.write_tap(packet).await?;
 
-        println!("{n} bytes written");
+        trace!("{n} bytes written");
         Ok(())
     }
 
@@ -138,14 +142,14 @@ impl SkCb {
     pub async fn close_socket(&self) {
         // waiting until we close the socket: TIME WAIT TIMEOUT
         tokio::time::sleep(Duration::new(TW, 0)).await;
-        self.snd_chan.con_table.write().remove(&self.con);
+        self.snd_chan.remove_sock(&self.con);
     }
 
     pub async fn send_rst(&self, tcp_hdr: &TCP_hdr) -> Result<()> {
-        warn!("sending reset");
+        debug!("sending reset");
         if tcp_hdr.check_rst() {
             // never respond to rst with rst
-            debug!("cant respond to RST with RST");
+            warn!("cant respond to RST with RST");
             return Ok(());
         }
 
@@ -345,5 +349,31 @@ impl TransmissionQueue {
 pub struct QEntry {
     pub seg: u32,
     pub data: usize,
-    pub len: usize,
+    pub len: u16,
+}
+
+#[derive(Debug, Default)]
+pub struct RcvBuffer(Vec<u8>);
+
+impl RcvBuffer {
+    pub fn new() -> Self {
+        RcvBuffer(vec![0u8; RCV_BUF_SIZE])
+    }
+
+    pub fn insert(&mut self, data: &[u8], seq: u32, isn: u32) -> Result<()> {
+        let idx = (isn - seq) as usize;
+        if idx + data.len() > self.0.len() {
+            return Err(Error::Socket(
+                "rcv buffer insert exceeds capacity".to_string(),
+            ));
+        }
+        let slice = self.0.as_mut_slice();
+
+        slice[idx..idx + data.len()].copy_from_slice(data);
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Vec<u8> {
+        std::mem::replace(&mut self.0, vec![0u8; RCV_BUF_SIZE])
+    }
 }

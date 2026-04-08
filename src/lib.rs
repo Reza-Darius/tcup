@@ -11,9 +11,10 @@ pub mod eth;
 pub mod icmp;
 pub mod ip;
 pub mod ipc;
-pub mod rto;
 pub mod tap;
 pub mod tcp;
 pub mod tcup;
 pub mod types;
 pub mod utils;
+
+pub use error::{Error, Result};

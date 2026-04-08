@@ -1,7 +1,7 @@
-use std::{net::Ipv4Addr, sync::Arc};
+use std::net::Ipv4Addr;
 
 use bytemuck::{Pod, Zeroable};
-use tracing::{error, info};
+use tracing::{debug, error};
 
 use crate::{
     error::Result, eth::EthFrame, icmp::handle_icmp, tcp::handle_tcp, tcup::TCup, types::MockHost,
@@ -132,12 +132,11 @@ impl std::fmt::Display for IP_hdr {
     }
 }
 
-pub async fn handle_ip_frame(inc: EthFrame, tcup: Arc<TCup>, host: &mut MockHost) -> Result<()> {
+pub async fn handle_ip_frame(inc: EthFrame, tcup: TCup, host: &mut MockHost) -> Result<()> {
     let eth_pay = inc.get_eth_pay();
-
     let ip_hdr = check_ip_packet(eth_pay)?;
 
-    info!("handling IP packet\n{}", ip_hdr);
+    debug!("handling IP packet\n{}", ip_hdr);
 
     match ip_hdr.prot {
         IPPROTO_ICMP => handle_icmp(inc, tcup, host).await,
