@@ -16,7 +16,8 @@ enum SocketCalls {
     Status(SocketId),
 }
 
-enum SocketWorkerMsg {
+#[derive(Debug)]
+pub enum SocketWorkerMsg {
     Close,
     Error(Error),
     Send,

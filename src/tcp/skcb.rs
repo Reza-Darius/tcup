@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-use std::fmt::Display;
 use std::time::Duration;
 
 use tokio::sync::mpsc::Receiver;
@@ -11,6 +9,8 @@ use crate::eth::{ETH_P_IP, Eth_hdr};
 use crate::ip::{IP_DF, IP_HDR_MINSIZE, IP_hdr, IPPROTO_TCP, TOS_BEST_EFFORT, TTL_START};
 use crate::tcp::hdr::{TCP_hdr, TCPFlags};
 use crate::tcp::opts::TCP_opts;
+use crate::tcp::sock::*;
+use crate::tcp::timer::RTO_START;
 use crate::tcp::{TCP_HDR_MINSIZE, TW, WND_SIZE, seq_lt, seq_lte, tcp_check};
 use crate::tcup::TCup;
 use crate::types::{Mac, TCPCon};
@@ -26,8 +26,7 @@ pub struct SkCb {
 
     pub snd_chan: TCup,
     pub snd_buf: Vec<u8>, // buffer for the input message
-    pub rt_queue: TransmissionQueue,
-
+    // pub rt_queue: RTQ,
     pub msg: EthFrame, // the last message received on the connection
 
     pub status: TCPState,
@@ -41,13 +40,13 @@ impl SkCb {
     pub fn new(inc: EthFrame, rx: Receiver<EthFrame>, tcup: TCup, con: TCPCon) -> Box<Self> {
         let eth_hdr = inc.get_eth_hdr();
 
-        Box::new(SkCb {
+        let mut skcb = Box::new(SkCb {
             rcv_chan: rx,
             rcv_buffer: Vec::with_capacity(RCV_BUF_SIZE),
             snd_chan: tcup,
             snd_buf: vec![],
             msg: inc,
-            rt_queue: TransmissionQueue(VecDeque::new()),
+            // rt_queue: RTQ(VecDeque::new()),
             status: TCPState::Closed,
             tcb: Tcb::default(),
 
@@ -57,7 +56,10 @@ impl SkCb {
                 ETH_P_IP,
             ),
             con,
-        })
+        });
+
+        skcb.tcb.rto = Duration::from_secs(RTO_START);
+        skcb
     }
 
     /// listens for a packet on the receiver
@@ -77,7 +79,7 @@ impl SkCb {
         let inc_tcp_hdr = eth.get_tcp_hdr()?;
 
         // checksum
-        tcp_check(inc_ip_hdr, eth.get_ip_pay()?);
+        tcp_check(&inc_ip_hdr, eth.get_ip_pay()?);
 
         // populate control block
         self.update(&inc_ip_hdr, &inc_tcp_hdr);
@@ -240,6 +242,16 @@ impl SkCb {
             }
         }
     }
+
+    pub async fn recv_message(&self) -> SocketWorkerMsg {
+        todo!()
+    }
+
+    pub fn update_timer(&mut self) {}
+
+    pub fn is_rtq_empty(&self) -> bool {
+        true
+    }
 }
 
 /// transmission control block
@@ -268,6 +280,14 @@ pub struct Tcb {
 
     pub snd_opts: TCP_opts,
     pub rcv_opts: TCP_opts,
+
+    // timer in miliseconds
+    /// smooth round trip
+    pub srtt: Duration,
+    /// round trip time variation
+    pub rttvar: Duration,
+    /// retransmission timeoutt
+    pub rto: Duration,
 }
 
 impl std::fmt::Display for Tcb {
@@ -316,40 +336,6 @@ pub enum TCPState {
 
     #[default]
     Closed,
-}
-
-/*
- A segment on the retransmission queue is fully acknowledged if the sum of its sequence number and length is less than or equal to the acknowledgment value in the incoming segment.
-
- Only segments that advance SND.NXT (i.e., consume sequence space) are tracked for retransmission.
-*/
-
-#[derive(Debug, Default)]
-pub struct TransmissionQueue(VecDeque<QEntry>);
-
-impl TransmissionQueue {
-    pub fn push(&mut self, elem: QEntry) {
-        self.0.push_back(elem);
-    }
-    pub fn pop(&mut self) -> Option<QEntry> {
-        self.0.pop_front()
-    }
-    pub fn peek(&self) -> Option<&QEntry> {
-        self.0.front()
-    }
-    pub fn match_front(&self, seg: u32) -> bool {
-        if let Some(elem) = self.peek() {
-            return elem.seg == seg;
-        }
-        false
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct QEntry {
-    pub seg: u32,
-    pub data: usize,
-    pub len: u16,
 }
 
 #[derive(Debug, Default)]

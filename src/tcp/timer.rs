@@ -2,9 +2,12 @@ use std::{sync::atomic::AtomicU64, time::Duration};
 
 pub static TICK: AtomicU64 = AtomicU64::new(0);
 
-/// Retransmission timeout, how long to wait for an ACK before resending the segment in seconds
-///
-/// double on each retry
+/*
+Retransmission timeout, how long to wait for an ACK before resending the segment in seconds
+double on each retry
+
+ */
+
 pub const RTO_START: u64 = 1;
 pub const RTO_CAP: u64 = 60;
 
@@ -15,9 +18,12 @@ pub const TW: u64 = MSL * 2;
 pub const MSL: u64 = 60;
 pub const FIN_TIMEOUT: u64 = 60;
 
+/// granularity of the clock, the linux kernel uses 200ms and 500ms
+pub const CLOCK_GRAN: u64 = 500; // miliseconds
+
 pub fn start_clock() {
     tokio::spawn(async {
-        let mut int = tokio::time::interval(Duration::from_millis(500));
+        let mut int = tokio::time::interval(Duration::from_millis(CLOCK_GRAN));
         loop {
             int.tick().await;
             TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

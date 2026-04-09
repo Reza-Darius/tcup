@@ -493,6 +493,7 @@ dependencies = [
  "dashmap",
  "libc",
  "parking_lot",
+ "pin-project-lite",
  "rustix",
  "siphasher",
  "test-log",

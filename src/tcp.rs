@@ -1,6 +1,7 @@
 pub mod hdr;
 pub mod heap;
 pub mod opts;
+pub mod rto;
 pub mod skcb;
 pub mod sock;
 pub mod timer;
@@ -11,14 +12,15 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use siphasher::sip::SipHasher13;
-use tokio::select;
 use tokio::sync::mpsc::channel;
-use tracing::{debug, info, instrument, warn};
+use tokio::{pin, select};
+use tracing::{error, info, instrument, warn};
 
 use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_PAY_MAX_SIZE};
 use crate::ip::{IP_HDR_MINSIZE, IP_hdr};
 use crate::tcp::hdr::{PseudoHdr, TCP_hdr, TCPFlags};
 use crate::tcp::opts::TCP_opts;
+use crate::tcp::rto::RTO;
 use crate::tcp::skcb::{SkCb, TCPState};
 use crate::tcp::sock::Socket;
 use crate::tcp::timer::*;
@@ -41,7 +43,7 @@ pub const SYN_ACK_RETRIES: u64 = 5;
 pub async fn handle_tcp(inc: EthFrame, tcup: TCup, host: &mut MockHost) -> Result<()> {
     let ip_hdr = inc.get_ip_hdr()?;
 
-    if !tcp_check(ip_hdr, inc.get_ip_pay()?) {
+    if !tcp_check(&ip_hdr, inc.get_ip_pay()?) {
         return Err("TCP checksum error".into());
     }
 
@@ -88,12 +90,23 @@ pub async fn handle_tcp(inc: EthFrame, tcup: TCup, host: &mut MockHost) -> Resul
 }
 
 /// main TCP loop running on a dedicated tokio task
-#[instrument(skip_all, err)]
+#[instrument(skip_all)]
 async fn tcp_input(mut skcb: Box<SkCb>) -> Result<()> {
     loop {
         // TODO: listen on receiver for events then go into state functions
+        let mut rto = RTO::new();
 
-        let _ = match skcb.status {
+        select! {
+                msg = skcb.recv_message() => {
+                    todo!()
+                }
+                _ =  &mut rto => {
+                    // send segment in queue if any
+                    rto.backoff();
+                }
+        }
+
+        if let Err(e) = match skcb.status {
             TCPState::SynSent => syn_sent(&mut skcb).await,
             TCPState::SynReceived => syn_received(&mut skcb).await,
             TCPState::Established => established(&mut skcb).await,
@@ -105,6 +118,8 @@ async fn tcp_input(mut skcb: Box<SkCb>) -> Result<()> {
             TCPState::Listen => todo!(),
 
             TCPState::Closed => break,
+        } {
+            error!(?e, "error")
         };
     }
     skcb.close_socket().await;
@@ -352,7 +367,7 @@ async fn established(skcb: &mut SkCb) -> Result<()> {
         skcb.con.sip, skcb.con.sport
     );
 
-    // TODO: react to SENC calls
+    // TODO: react to SEND calls
 
     let resp = skcb.receive().await?;
 
@@ -560,7 +575,7 @@ async fn last_ack(skcb: &mut SkCb) -> Result<()> {
     }
 }
 
-// TODO: implement 4 microsecond clock
+// TODO: implement 4 microsecond clock, and make this nice
 fn new_isn(con: &TCPCon) -> u32 {
     let key: &[u8; 16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let mut hasher = SipHasher13::new_with_key(key);
@@ -573,7 +588,7 @@ fn new_isn(con: &TCPCon) -> u32 {
 }
 
 /// returns true on valid checksum
-fn tcp_check(ip_hdr: IP_hdr, ip_pay: &[u8]) -> bool {
+fn tcp_check(ip_hdr: &IP_hdr, ip_pay: &[u8]) -> bool {
     if ip_hdr.tot_len as usize > ETH_PAY_MAX_SIZE - IP_HDR_MINSIZE {
         return false;
     }

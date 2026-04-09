@@ -2,8 +2,6 @@
  * Internet Control Message Protocol (ICMP)
  */
 
-use std::sync::Arc;
-
 use bytemuck::{Pod, Zeroable};
 use tracing::info;
 
