@@ -1,8 +1,7 @@
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 use crate::arp::handle_arp;
 use crate::error::Result;
@@ -13,7 +12,7 @@ use crate::tcp::{
     opts::TCP_opts,
 };
 use crate::tcup::TCup;
-use crate::types::{Mac, MockHost, TCPCon};
+use crate::types::{Mac, TCPCon};
 use crate::utils::{calc_checksum_be, mac_to_str};
 
 /*
@@ -27,7 +26,7 @@ use crate::utils::{calc_checksum_be, mac_to_str};
 
 const FCS_SIZE: usize = 4;
 pub const MAC_ADDR_LEN: usize = 6;
-pub const IP_ADDR_LEN: usize = 6;
+pub const IP_ADDR_LEN: usize = 4;
 pub const ETH_FRAME_MIN_SIZE: usize = ETH_HDR_SIZE + ETH_PAY_MIN_SIZE; // min size sans FCS
 pub const ETH_FRAME_MAX_SIZE: usize = ETH_PAY_MAX_SIZE + ETH_HDR_SIZE; // max size sans FCS
 pub const ETH_HDR_SIZE: usize = 14;
@@ -54,6 +53,8 @@ pub const TCP_HDR_DOF_OFF: usize = 12;
 /// minimum offset
 const TCP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE + TCP_HDR_MINSIZE;
 
+// TODO: refactor this
+
 #[derive(Debug, Default, Clone)]
 pub struct EthFrame {
     // network order bytes
@@ -61,7 +62,8 @@ pub struct EthFrame {
 }
 
 impl EthFrame {
-    pub fn from_be_bytes(data: &[u8]) -> Result<Self> {
+    pub fn from_be_bytes(data: impl AsRef<[u8]>) -> Result<Self> {
+        let data = data.as_ref();
         if data.len() > ETH_FRAME_MAX_SIZE {
             return Err("data exceeds MTU".into());
         }
@@ -355,12 +357,12 @@ impl EthFrame {
         // writing into the buffer for check
         let ctrl_off = TCP_PSEUDOHDR_SIZE + TCP_CHECK_OFFSET_FROM_HDR;
         buf[ctrl_off..ctrl_off + size_of::<u16>()].copy_from_slice(&check.to_be_bytes());
-        assert_eq!(0, calc_checksum_be(&buf[..buf_off]));
+        debug_assert_eq!(0, calc_checksum_be(&buf[..buf_off]));
 
         Ok(())
     }
 
-    fn get_tcp_opt(&self) -> Result<Option<TCP_opts>> {
+    pub fn get_tcp_opt(&self) -> Result<Option<TCP_opts>> {
         let tcphdr_size = self.tcphdr_size();
         if tcphdr_size < TCP_HDR_MINSIZE {
             return Err("frame doesnt hold TCP header".into());
@@ -416,10 +418,10 @@ impl EthFrame {
         let tcp_hdr = self.get_tcp_hdr()?;
 
         let con = TCPCon {
-            sip: Ipv4Addr::from_octets(ip_hdr.src_addr),
-            sport: tcp_hdr.sport,
-            dip: Ipv4Addr::from_octets(ip_hdr.dest_addr),
-            dport: tcp_hdr.dport,
+            remote_ip: Ipv4Addr::from_octets(ip_hdr.src_addr),
+            remote_port: tcp_hdr.sport,
+            local_ip: Ipv4Addr::from_octets(ip_hdr.dest_addr),
+            local_port: tcp_hdr.dport,
         };
         Ok(con)
     }
@@ -443,14 +445,11 @@ impl std::fmt::Display for Eth_hdr {
             ETH_P_ARP => String::from("ARP"),
             n => n.to_string(),
         };
-
-        writeln!(f, "┌─────────────────┬───────────────────┐")?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "Field", "Value")?;
-        writeln!(f, "├─────────────────┼───────────────────┤")?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "dst MAC", dest_mac)?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "src MAC", source_mac)?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "type", hrd_type)?;
-        write!(f, "└─────────────────┴───────────────────┘")
+        write!(
+            f,
+            "dmac: {}, smac: {}, typer: {}",
+            dest_mac, source_mac, hrd_type
+        )
     }
 }
 
@@ -478,21 +477,24 @@ impl Eth_hdr {
 }
 
 #[instrument(skip_all, err)]
-pub async fn handle_frame(inc: EthFrame, tcup: TCup, host: &mut MockHost) -> Result<()> {
+pub async fn handle_frame(inc: EthFrame, tcup: TCup) -> Result<()> {
     let hdr = inc.get_eth_hdr();
-    debug!("handling eth frame {:?}", hdr);
+    debug!("handling eth {}", hdr);
 
     // TODO: handle ip datagrams not directed at us
 
     match hdr.prot_type {
         ETH_P_IP => {
-            handle_ip_frame(inc, tcup, host).await?;
+            handle_ip_frame(inc, tcup).await?;
         }
         ETH_P_ARP => {
-            handle_arp(inc, tcup, host).await?;
+            handle_arp(inc, tcup).await?;
         }
         ETH_P_IPV6 => (),
-        _ => return Err("unsupported frame type".into()),
+        _ => {
+            warn!("IpV6 is not supported, dropping frame");
+            return Ok(());
+        }
     };
 
     Ok(())

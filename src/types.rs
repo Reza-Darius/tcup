@@ -1,8 +1,7 @@
-use std::{collections::HashMap, net::Ipv4Addr};
+use std::{net::Ipv4Addr, u32};
 
 use crate::utils::mac_to_str;
 
-#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Copy, Clone)]
 pub struct Mac([u8; 6]);
 
@@ -55,34 +54,10 @@ impl From<[u8; 6]> for Mac {
     }
 }
 
-#[derive(Debug)]
-pub struct MockHost {
-    pub arp_table: HashMap<Ipv4Addr, Mac>,
-    pub addr: Ipv4Addr,
-    pub mac: Mac,
-
-    pub port: u16,
-}
-
-impl MockHost {
-    pub fn new(ip: Ipv4Addr, mac: Mac, port: u16) -> Self {
-        MockHost {
-            arp_table: HashMap::new(),
-            addr: ip,
-            mac,
-            port,
-        }
-    }
-
-    pub fn get_mac(&self, ip: impl Into<Ipv4Addr>) -> Option<Mac> {
-        self.arp_table.get(&ip.into()).copied()
-    }
-}
-
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TCPCon {
-    pub sip: Ipv4Addr,
-    pub sport: u16,
-    pub dip: Ipv4Addr,
-    pub dport: u16,
+    pub local_ip: Ipv4Addr,
+    pub local_port: u16,
+    pub remote_ip: Ipv4Addr,
+    pub remote_port: u16,
 }

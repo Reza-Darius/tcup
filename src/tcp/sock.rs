@@ -1,17 +1,25 @@
-use crate::error::Error;
+use std::net::Ipv4Addr;
+
 use crate::eth::EthFrame;
 
 use bincode::{Decode, Encode};
 use tokio::sync::mpsc::Sender;
 
-enum SocketCalls {
-    Open,
-    Connect,
-    Listen,
+#[derive(Debug)]
+pub struct SocketCall {
+    id: SocketId,
+    call: Call,
+}
+
+#[derive(Debug, Decode, Encode)]
+pub enum Call {
+    Open(Ipv4Addr),
+    Connect(Ipv4Addr),
+    Listen(Ipv4Addr),
     Close(SocketId),
 
-    Send(Vec<u8>),
-    Receive,
+    Send(u32),
+    Receive(u32),
 
     Status(SocketId),
 }
@@ -19,9 +27,8 @@ enum SocketCalls {
 #[derive(Debug)]
 pub enum SocketWorkerMsg {
     Close,
-    Error(Error),
     Send,
-    Seg,
+    Frame(EthFrame),
 }
 
 #[derive(Debug, Encode, Decode)]
@@ -29,15 +36,10 @@ pub struct SocketId(i32);
 
 #[derive(Debug, Clone)]
 pub struct Socket {
-    pub tx: Sender<EthFrame>,
-    // // connection
-    // pub con: TCPCon,
-    // // status
-    // pub status: SocketStatus,
+    pub tx: Sender<SocketWorkerMsg>,
 }
 
-#[derive(Debug, Clone)]
-enum SocketStatus {
-    Closed,
-    Open,
+trait DataBus {
+    async fn send();
+    async fn recv();
 }

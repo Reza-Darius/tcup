@@ -6,13 +6,7 @@
     clippy::upper_case_acronyms
 )]
 
-use std::net::Ipv4Addr;
-
-use tcup::{
-    error::Result,
-    tcup::TCup,
-    types::{Mac, MockHost},
-};
+use tcup::{error::Result, tcup::TCup};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,36 +19,33 @@ async fn main() -> Result<()> {
 
     let if_name = "tcup";
     let if_addr = "10.0.0.1/24";
-    let port = 1337u16;
-
-    let mut dummy_host = MockHost::new(
-        Ipv4Addr::new(10, 0, 0, 4),
-        Mac::new(0x00, 0x0c, 0x29, 0x6d, 0x50, 0x25),
-        port,
-    );
+    let port = 1337;
 
     let tcup = TCup::init(if_name, if_addr)?;
 
-    tcup.run(&mut dummy_host).await;
-
+    tcup.run().await;
+    println!("shuttting down");
     Ok(())
+}
 
-    // let route = "10.0.0.0/24";
-    // let tap = TAPDevice::new(name)?;
-    // tap.set_if_link()?;
-    // tap.set_if_addr(addr)?;
-    // // tap.set_if_route(route)?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // let mut buf = Box::new([0u8; ETH_FRAME_MAX_SIZE]);
+    fn init_tcup() {
+        let if_name = "tcup";
+        let if_addr = "10.0.0.1/24";
+        let port = 1337;
+        let tcup = TCup::init(if_name, if_addr).unwrap();
 
-    // loop {
-    //     println!("listening...");
+        tokio::spawn(async move {
+            tcup.run().await;
+        });
+    }
 
-    //     let n = tap.read(&mut *buf).await.unwrap();
-    //     info!("{n} bytes received");
-
-    //     let frame = EthFrame::new(&buf[..n])?;
-
-    //     let _ = handle_frame(frame, &tap, &mut dummy_host);
-    // }
+    #[tokio::test]
+    async fn test_name() -> Result<()> {
+        init_tcup();
+        Ok(())
+    }
 }

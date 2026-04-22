@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use tracing::{debug, error};
 
 use crate::{
-    error::Result, eth::EthFrame, icmp::handle_icmp, tcp::handle_tcp, tcup::TCup, types::MockHost,
+    error::Result, eth::EthFrame, icmp::handle_icmp, tcp::handle_tcp, tcup::TCup,
     utils::calc_checksum_be,
 };
 
@@ -132,15 +132,15 @@ impl std::fmt::Display for IP_hdr {
     }
 }
 
-pub async fn handle_ip_frame(inc: EthFrame, tcup: TCup, host: &mut MockHost) -> Result<()> {
+pub async fn handle_ip_frame(inc: EthFrame, tcup: TCup) -> Result<()> {
     let eth_pay = inc.get_eth_pay();
     let ip_hdr = check_ip_packet(eth_pay)?;
 
     debug!("handling IP packet\n{}", ip_hdr);
 
     match ip_hdr.prot {
-        IPPROTO_ICMP => handle_icmp(inc, tcup, host).await,
-        IPPROTO_TCP => handle_tcp(inc, tcup, host).await,
+        IPPROTO_ICMP => handle_icmp(inc, tcup).await,
+        IPPROTO_TCP => handle_tcp(inc, tcup).await,
         _ => Err("IP protocol not supported".into()),
     }
 }

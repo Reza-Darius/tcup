@@ -1,15 +1,16 @@
+use std::fmt::Display;
 use std::net::Ipv4Addr;
-use std::{fmt::Display, sync::Arc};
 
 use crate::tcup::TCup;
 use crate::{
     error::Result,
     eth::{ETH_P_ARP, Eth_hdr, EthFrame},
-    types::{Mac, MockHost},
+    types::Mac,
     utils::mac_to_str,
 };
 use bytemuck::{Pod, Zeroable};
-use tracing::info;
+use bytes::{BufMut, BytesMut};
+use tracing::{debug, info};
 
 use crate::eth::{ETH_HDR_SIZE, ETH_P_IP, ETH_P_IPV6, ETH_PAY_MIN_SIZE, IP_ADDR_LEN, MAC_ADDR_LEN};
 
@@ -107,14 +108,14 @@ impl Display for ArpPacket {
 }
 
 /// in case the ARP request was directed at us, it returns an appropiate response packet
-pub async fn handle_arp(mut inc: EthFrame, tcup: TCup, host: &mut MockHost) -> Result<()> {
+pub async fn handle_arp(mut inc: EthFrame, tcup: TCup) -> Result<()> {
     info!("handling ARP\n");
 
     let arp_packet = ArpPacket::from_be_bytes(inc.get_eth_pay()[..ARP_PACKET_SIZE].try_into()?);
     println!("{}\n", &arp_packet);
 
-    if let Some(arp_packet) = run_arp_check(arp_packet, host) {
-        let hdr = Eth_hdr::new(arp_packet.dmac.into(), host.mac, ETH_P_ARP);
+    if let Some(arp_packet) = run_arp_check(arp_packet, &tcup) {
+        let hdr = Eth_hdr::new(arp_packet.dmac.into(), arp_packet.smac.into(), ETH_P_ARP);
 
         inc.set_eth_hdr(hdr);
         inc.set_eth_pay(&arp_packet.into_be_bytes())?;
@@ -127,9 +128,19 @@ pub async fn handle_arp(mut inc: EthFrame, tcup: TCup, host: &mut MockHost) -> R
     Ok(())
 }
 
-async fn arp_broadcast(tcup: &TCup, ip: Ipv4Addr, host: &MockHost) -> Result<()> {
+pub async fn arp_broadcast(tcup: &TCup, ip: Ipv4Addr) -> Result<()> {
+    debug!("sending ARP broadcast");
+
     const PADDING: usize = ETH_PAY_MIN_SIZE - ARP_PACKET_SIZE;
-    let mut buf = [0u8; ETH_HDR_SIZE + ARP_PACKET_SIZE + PADDING];
+    const SIZE: usize = ETH_HDR_SIZE + ARP_PACKET_SIZE + PADDING;
+
+    let mut buf = BytesMut::with_capacity(SIZE);
+
+    let eth = Eth_hdr {
+        dmac: ARP_BROADCAST_ADDR,
+        smac: tcup.mac().octets(),
+        prot_type: ETH_P_ARP,
+    };
 
     let arp = ArpPacket {
         hwtype: ARP_HRD_ETHER,
@@ -137,26 +148,24 @@ async fn arp_broadcast(tcup: &TCup, ip: Ipv4Addr, host: &MockHost) -> Result<()>
         hwsize: MAC_ADDR_LEN as u8,
         prosize: IP_ADDR_LEN as u8,
         opcode: ARPOP_REQUEST,
-        smac: host.mac.octets(),
-        sip: host.addr.octets(),
+        smac: tcup.mac().octets(),
+        sip: tcup.addr().octets(),
         dmac: [0, 0, 0, 0, 0, 0],
         dip: ip.octets(),
     };
-    let eth = Eth_hdr {
-        dmac: ARP_BROADCAST_ADDR,
-        smac: host.mac.octets(),
-        prot_type: ETH_P_ARP,
-    };
 
-    buf[..ETH_HDR_SIZE].copy_from_slice(&eth.into_be_bytes());
-    buf[ETH_HDR_SIZE..ETH_HDR_SIZE + ARP_PACKET_SIZE].copy_from_slice(&arp.into_be_bytes());
+    buf.put_slice(&eth.into_be_bytes());
+    buf.put_slice(&arp.into_be_bytes());
 
-    let frame = EthFrame::from_be_bytes(&buf)?;
+    assert_eq!(buf.len(), SIZE);
+
+    let frame = EthFrame::from_be_bytes(buf)?;
     tcup.write_tap(frame).await?;
+
     Ok(())
 }
 
-fn run_arp_check(mut arp: ArpPacket, host: &mut MockHost) -> Option<ArpPacket> {
+fn run_arp_check(mut arp: ArpPacket, tcup: &TCup) -> Option<ArpPacket> {
     let sender_mac = Mac::from_octets(arp.smac);
     let sender_ip = Ipv4Addr::from_octets(arp.sip);
 
@@ -176,18 +185,18 @@ fn run_arp_check(mut arp: ArpPacket, host: &mut MockHost) -> Option<ArpPacket> {
     // do we have an entry for the sender ip address?
     //      if yes, update ip address with sender mac
     //          set merge_flag = true
-    if host.arp_table.insert(sender_ip, sender_mac).is_some() {
+    if tcup.arp_table_insert(sender_ip, sender_mac).is_some() {
         merge_flag = true;
     }
 
     // am i the target of the ip address?
-    if target_ip != host.addr {
+    if target_ip != tcup.addr() {
         return None;
     }
 
     // if merge_flag = false add sender ip address with sender mac to table
     if !merge_flag {
-        host.arp_table.insert(sender_ip, sender_mac);
+        tcup.arp_table_insert(sender_ip, sender_mac);
     }
 
     if arp.opcode == ARPOP_REPLY {
@@ -199,15 +208,14 @@ fn run_arp_check(mut arp: ArpPacket, host: &mut MockHost) -> Option<ArpPacket> {
     //     set opcode to reply
     //             send the packet away
     if arp.opcode == ARPOP_REQUEST {
-        arp.smac = host.mac.octets();
-        arp.sip = host.addr.octets();
+        arp.smac = tcup.mac().octets();
+        arp.sip = tcup.addr().octets();
 
         arp.dmac = sender_mac.octets();
         arp.dip = sender_ip.octets();
 
         arp.opcode = ARPOP_REPLY;
 
-        println!("sending arp:\n{}\n", &arp);
         return Some(arp);
     }
     None

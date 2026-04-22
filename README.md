@@ -6,12 +6,18 @@
 
 Tcup is an asynchronous virtual networking interface capable of handling TCP/IP traffic
 
-## Overview
+## Working Features
 - uses linux TAP devices to create a virtual interface
 - handles Ethernet Frames (RFC 1042) and ARP (RFC 826)
 - handles ICMP echoes (RFC 792)
-- handles TCP (RFC 793)
-- coming soon: socket API
+- handles TCP Listen (RFC 793)
+
+## Current WIP
+
+- RTO
+- Retransmission Queue
+- UDS based IPC protocol
+- Berkley Socket API
 
 ## Getting Started (coming soon)
 

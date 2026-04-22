@@ -1,6 +1,6 @@
 use crate::error::Result;
 use caps::{CapSet, Capability};
-use std::io;
+use std::{io, net::Ipv4Addr};
 
 pub fn setup_cap() -> Result<()> {
     // Add CAP_NET_ADMIN to inheritable set
@@ -73,6 +73,31 @@ pub fn calc_checksum_be(bytes: &[u8]) -> u16 {
 //     sum = sum.swap_bytes();
 //     !sum as u16
 // }
+//
+
+pub fn get_default_gateway() -> Option<Ipv4Addr> {
+    let content = std::fs::read_to_string("/proc/net/route").ok()?;
+
+    for line in content.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 3 {
+            continue;
+        }
+        // destination == 00000000 means default route
+        if fields[1] == "00000000" {
+            let gw = u32::from_str_radix(fields[2], 16).ok()?;
+            // value is in little-endian hex
+            return Some(Ipv4Addr::from(u32::from_le(gw)));
+        }
+    }
+    None
+}
+
+/// from 24 to 255.255.255.0
+pub fn cidr_to_mask(subnet: u8) -> u32 {
+    assert!(subnet != 0);
+    u32::MAX << (32 - subnet)
+}
 
 #[cfg(test)]
 mod tests {

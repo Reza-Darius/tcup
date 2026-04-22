@@ -1,13 +1,18 @@
 #![allow(dead_code, unused_variables, unused_assignments)]
 
-use crate::{error::Result, eth::EthFrame};
-use std::{ffi::c_void, os::fd::OwnedFd, process::Command};
+use crate::{error::Result, eth::EthFrame, types::Mac};
+use std::{
+    ffi::c_void,
+    os::fd::{AsRawFd, OwnedFd},
+    process::Command,
+};
 
 use rustix::{
     fs::{Mode, OFlags},
     ioctl::Ioctl,
 };
 use tokio::io::unix::AsyncFd;
+use tracing::info;
 
 const IFF_TAP: i16 = 0x2;
 const IFF_NO_PI: i16 = 0x1000;
@@ -47,6 +52,8 @@ impl TAPDevice {
 
         unsafe { rustix::ioctl::ioctl(&fd, &mut ifreq)? };
 
+        info!("tap initialized");
+
         Ok(TAPDevice {
             name: name.to_string(),
             fd: AsyncFd::new(fd)?,
@@ -80,7 +87,6 @@ impl TAPDevice {
     }
 
     pub fn set_if_link(&self) -> Result<()> {
-        println!("ip link set dev {} up", &self.name);
         let output = Command::new("ip")
             .args(["link", "set", "dev", &self.name, "up"])
             .output()
@@ -90,11 +96,11 @@ impl TAPDevice {
             let err = String::from_utf8(output.stderr).unwrap();
             return Err(crate::error::Error::Ip(err));
         }
+        info!("ip link set dev {} up", &self.name);
         Ok(())
     }
 
     pub fn set_if_route(&self, route: &str) -> Result<()> {
-        println!("ip route add {} dev {}", route, &self.name);
         let output = Command::new("ip")
             .args(["route", "add", route, "dev", &self.name])
             .output()
@@ -104,11 +110,11 @@ impl TAPDevice {
             let err = String::from_utf8(output.stderr).unwrap();
             return Err(crate::error::Error::Ip(err));
         }
+        info!("ip route add {} dev {}", route, &self.name);
         Ok(())
     }
 
     pub fn set_if_addr(&self, addr: &str) -> Result<()> {
-        println!("ip addr add {} dev {} ", addr, &self.name);
         let output = Command::new("ip")
             .args(["addr", "add", "dev", &self.name, "local", addr])
             .output()
@@ -118,7 +124,40 @@ impl TAPDevice {
             let err = String::from_utf8(output.stderr).unwrap();
             return Err(crate::error::Error::Ip(err));
         }
+        info!("ip addr add {} dev {} ", addr, &self.name);
         Ok(())
+    }
+
+    /// this needs to be called after settting the interface up otherwise the MAC address
+    /// can get reassigned
+    pub fn get_mac(&self) -> Result<Mac> {
+        let name = &self.name;
+        let fd = &self.fd;
+
+        let mut ifreq = Ifreq {
+            ifrname: [0; IFNAMSIZ],
+            ifreqdata: Ifreqdata {
+                data: [0; IFRQ_UNION_SIZE],
+            },
+        };
+        ifreq.ifrname[..name.len()].copy_from_slice(name.as_bytes());
+
+        let ret = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCGIFHWADDR, &mut ifreq) };
+        if ret < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        let sa_data = unsafe { ifreq.ifreqdata.hwaddr.sa_data };
+        let mac = Mac::from_octets([
+            sa_data[0] as u8,
+            sa_data[1] as u8,
+            sa_data[2] as u8,
+            sa_data[3] as u8,
+            sa_data[4] as u8,
+            sa_data[5] as u8,
+        ]);
+        info!("got MAC {mac}");
+        Ok(mac)
     }
 }
 
