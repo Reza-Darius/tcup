@@ -22,8 +22,4 @@ impl RcvBuffer {
         slice[idx..idx + data.len()].copy_from_slice(data);
         Ok(())
     }
-
-    pub fn flush(&mut self) -> Vec<u8> {
-        std::mem::replace(&mut self.0, vec![0u8; RCV_BUF_SIZE])
-    }
 }

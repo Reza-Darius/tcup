@@ -6,7 +6,6 @@
     clippy::upper_case_acronyms
 )]
 pub mod arp;
-pub mod batch_channel;
 pub mod error;
 pub mod eth;
 pub mod icmp;

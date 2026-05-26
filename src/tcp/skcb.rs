@@ -313,7 +313,7 @@ impl SkCb {
             tokio::select! {
                 res = self.inner.rcv_chan.recv() => {
                     trace!("message recieved");
-                    let msg = res.expect("the channel cant be closed");
+                    let msg = res.expect("assert: the channel cant be closed");
 
                     match self.handle_worker_msg(msg) {
                         Ok(event) => return event,

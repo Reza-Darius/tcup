@@ -17,10 +17,6 @@ use tracing::info;
 const IFF_TAP: i16 = 0x2;
 const IFF_NO_PI: i16 = 0x1000;
 const IFNAMSIZ: usize = 16; // including null terminator
-// #define TUNSETIFF  _IOW('T', 202, int)
-//
-// pub const fn write<T>(group: u8, number: u8) -> Opcode
-// _IOW(group, number, T)
 
 #[derive(Debug)]
 pub struct TAPDevice {
@@ -166,6 +162,11 @@ struct Ifreq {
     ifrname: [u8; IFNAMSIZ],
     ifreqdata: Ifreqdata,
 }
+
+// #define TUNSETIFF  _IOW('T', 202, int)
+//
+// pub const fn write<T>(group: u8, number: u8) -> Opcode
+// _IOW(group, number, T)
 
 unsafe impl Ioctl for &mut Ifreq {
     type Output = ();

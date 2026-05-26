@@ -11,7 +11,7 @@ use crate::tap::TAPDevice;
 use crate::tcp::sock::Socket;
 use crate::tcp::timer::start_clock;
 use crate::types::{Mac, TCPCon};
-use crate::utils::{get_default_gateway, setup_cap};
+use crate::utils::{cidr_to_mask, get_default_gateway, setup_cap};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, trace, warn};
