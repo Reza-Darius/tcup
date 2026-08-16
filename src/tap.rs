@@ -82,6 +82,7 @@ impl TAPDevice {
         }
     }
 
+    /// brings the tap device online
     pub fn set_if_link(&self) -> Result<()> {
         let output = Command::new("ip")
             .args(["link", "set", "dev", &self.name, "up"])
@@ -96,6 +97,7 @@ impl TAPDevice {
         Ok(())
     }
 
+    /// adds tap device to routing table
     pub fn set_if_route(&self, route: &str) -> Result<()> {
         let output = Command::new("ip")
             .args(["route", "add", route, "dev", &self.name])
@@ -110,6 +112,7 @@ impl TAPDevice {
         Ok(())
     }
 
+    /// assigns an ip address to the interface
     pub fn set_if_addr(&self, addr: &str) -> Result<()> {
         let output = Command::new("ip")
             .args(["addr", "add", "dev", &self.name, "local", addr])
@@ -129,6 +132,7 @@ impl TAPDevice {
     pub fn get_mac(&self) -> Result<Mac> {
         let name = &self.name;
         let fd = &self.fd;
+
 
         let mut ifreq = Ifreq {
             ifrname: [0; IFNAMSIZ],

@@ -78,10 +78,12 @@ impl EthFrame {
     }
 
     fn with_cap(cap: usize) -> Result<Self> {
+        if cap == 0 {
+            return Err("capacity cant be zero".into())
+        }
         if cap > ETH_FRAME_MAX_SIZE {
             return Err("data exceeds MTU".into());
         }
-
         if cap < ETH_HDR_SIZE {
             return Err("data below minimum eth hdr size".into());
         }
@@ -119,6 +121,7 @@ impl EthFrame {
         Ok(packet)
     }
 
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.data.len()
     }

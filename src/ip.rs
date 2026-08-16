@@ -83,6 +83,7 @@ impl IP_hdr {
     }
 
     /// retrieves the size of the IP header in bytes
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         get_hdr_len(self.ver_ihl)
     }

@@ -10,7 +10,7 @@ use tokio::select;
 use tokio::sync::mpsc::Sender;
 use tracing::error;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::ip::IP_HDR_MINSIZE;
 use crate::tcp::TCP_HDR_MAXSIZE;

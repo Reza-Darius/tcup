@@ -3,7 +3,7 @@ use std::{sync::atomic::AtomicU64, time::Duration};
 pub static TICK: AtomicU64 = AtomicU64::new(0);
 
 /// After sending the final FIN+ACK, you must linger before fully closing the socket. Prevents old duplicate segments from a dead connection being mistaken for a new one.
-pub const TIME_WAIT: u64 = MSL * 1;
+pub const TIME_WAIT: u64 = MSL;
 
 /// Maximum segment lifetime
 pub const MSL: u64 = 60; // seconds

@@ -17,23 +17,6 @@ pub struct RTO {
     inner: Pin<Box<RTOInner>>,
 }
 
-impl Future for RTO {
-    type Output = ();
-
-    fn poll(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        self.inner.as_mut().poll(cx)
-    }
-}
-
-impl Default for RTO {
-    fn default() -> Self {
-        RTO::new()
-    }
-}
-
 impl RTO {
     /// new RTO timer with a RTO of 1 second
     pub fn new() -> RTO {
@@ -55,7 +38,7 @@ impl RTO {
         *this.rto *= 2;
     }
 
-    /// completely resets the RTO, mainly to reuse the allocation
+    /// completely resets the RTO, this allows reusing the allocation
     pub fn clear(&mut self) {
         let this = self.inner.as_mut().project();
         let rto_default = Duration::from_millis(RTO_START);
@@ -110,6 +93,23 @@ impl RTO {
             *this.rto = max(rto_calc, Duration::from_millis(RTO_START)); // round to 1 second
         };
         trace!(?this.srtt, ?this.rttvar, ?this.rto, "calculated RTO");
+    }
+}
+
+impl Future for RTO {
+    type Output = ();
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.inner.as_mut().poll(cx)
+    }
+}
+
+impl Default for RTO {
+    fn default() -> Self {
+        RTO::new()
     }
 }
 

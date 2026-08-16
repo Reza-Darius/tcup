@@ -1,4 +1,4 @@
-use std::{net::Ipv4Addr, u32};
+use std::{net::Ipv4Addr};
 
 use crate::utils::mac_to_str;
 
