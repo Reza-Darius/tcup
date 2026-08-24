@@ -32,6 +32,11 @@ pub struct TAPDeviceOptions {
 }
 
 impl TAPDevice {
+    /// creates a new TAP network device, requires elevated privleges
+    ///
+    /// name can only be maximum 15 bytes long and should only contain ascii character
+    ///
+    /// can optionally be given an address and subnet
     pub async fn new(name: impl AsRef<[u8]>, opts: TAPDeviceOptions) -> Result<Self> {
         let name = name.as_ref();
 
@@ -46,8 +51,8 @@ impl TAPDevice {
 
         // we monitor udev devices to retrieve a stable MAC address later
         // the socket needs to be set up before opening the tap device!
-        let socket = udev_sock()?;
-        let fd = open_tap(name)?;
+        let monitor_sock = udev_sock()?;
+        let tap = open_tap(name)?;
 
         // set up tap device
         let name = String::from_utf8(name.to_vec())?;
@@ -66,14 +71,14 @@ impl TAPDevice {
         if_link_up(&handler, name.clone()).await?;
 
         // wait for stable MAC address
-        await_udev(socket, &name).await?;
-        let mac = request_mac(fd.as_raw_fd(), name.as_bytes())?;
+        await_udev(monitor_sock, &name).await?;
+        let mac = request_mac(tap.as_raw_fd(), name.as_bytes())?;
 
         Ok(TAPDevice {
             name,
             addr: opts.addr,
             mac,
-            fd: AsyncFd::new(fd)?,
+            fd: AsyncFd::new(tap)?,
         })
     }
 
@@ -282,17 +287,21 @@ impl AsyncWrite for TAPDevice {
 
 #[cfg(test)]
 mod test {
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::net::Ipv4Addr;
+
+    use futures::StreamExt;
+    use rtnetlink::packet_route::{address::AddressAttribute, link::LinkAttribute};
 
     use super::*;
 
     #[tokio::test]
     async fn tap() {
+        let name = "tcup0";
         let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0));
         let subnet = 8;
 
         let tap = TAPDevice::new(
-            "tcup0",
+            name,
             TAPDeviceOptions {
                 addr: Some((addr, subnet)),
             },
@@ -300,11 +309,36 @@ mod test {
         .await
         .unwrap();
 
-        assert_eq!(tap.addr().unwrap(), addr);
+        // println!("mac address: {}", tap.mac());
+        // println!("ip address: {}", tap.addr().unwrap());
 
-        println!("mac address: {}", tap.mac());
-        println!("ip address: {}", tap.addr().unwrap());
+        let (con, handle, _) = new_connection().unwrap();
+        tokio::spawn(con);
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        let mut link_addr = handle.address().get().set_address_filter(addr).execute();
+        let link_addr = link_addr.next().await.unwrap().unwrap();
+
+        assert!(link_addr.attributes.iter().any(|attr| {
+            if let AddressAttribute::Address(a) = attr
+                && *a == addr
+            {
+                true
+            } else {
+                false
+            }
+        }));
+
+        let mut links = handle.link().get().match_name(name).execute();
+        let links = links.next().await.unwrap().unwrap();
+
+        assert!(links.attributes.iter().any(|attr| {
+            if let LinkAttribute::Address(mac) = attr
+                && mac.as_slice() == tap.mac().octets()
+            {
+                true
+            } else {
+                false
+            }
+        }));
     }
 }
