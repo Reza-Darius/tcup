@@ -294,6 +294,7 @@ mod test {
 
     use super::*;
 
+    #[ignore = "this test required elevated privileges"]
     #[tokio::test]
     async fn tap() {
         let name = "tcup0";
