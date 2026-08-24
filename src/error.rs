@@ -1,4 +1,4 @@
-use std::array::TryFromSliceError;
+use std::{array::TryFromSliceError, string::FromUtf8Error};
 
 use bincode::error::DecodeError;
 use thiserror::Error;
@@ -38,6 +38,10 @@ pub enum Error {
     Socket(#[from] SocketError),
     #[error("{0}")]
     Decode(#[from] DecodeError),
+    #[error("{0}")]
+    Utf8(#[from] FromUtf8Error),
+    #[error("{0}")]
+    Rtnetlink(#[from] rtnetlink::Error),
 }
 
 #[derive(Error, Debug)]
