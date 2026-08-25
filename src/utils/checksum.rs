@@ -1,34 +1,5 @@
 use crate::error::Result;
-use caps::{CapSet, Capability};
 use std::{io, net::Ipv4Addr};
-
-pub fn setup_cap() -> Result<()> {
-    // Add CAP_NET_ADMIN to inheritable set
-    caps::raise(None, CapSet::Inheritable, Capability::CAP_NET_ADMIN)?;
-
-    let r = unsafe {
-        libc::prctl(
-            libc::PR_CAP_AMBIENT,
-            libc::PR_CAP_AMBIENT_RAISE,
-            Capability::CAP_NET_ADMIN as i32,
-            0,
-            0,
-        )
-    };
-
-    if r != 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-
-    Ok(())
-}
-
-pub fn mac_to_str(buf: &[u8; 6]) -> String {
-    format!(
-        "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
-        buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]
-    )
-}
 
 /// assumes network order bytes
 pub fn calc_checksum_be(bytes: &[u8]) -> u16 {
@@ -75,23 +46,6 @@ pub fn calc_checksum_be(bytes: &[u8]) -> u16 {
 // }
 //
 
-pub fn get_default_gateway() -> Option<Ipv4Addr> {
-    let content = std::fs::read_to_string("/proc/net/route").ok()?;
-
-    for line in content.lines().skip(1) {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 3 {
-            continue;
-        }
-        // destination == 00000000 means default route
-        if fields[1] == "00000000" {
-            let gw = u32::from_str_radix(fields[2], 16).ok()?;
-            // value is in little-endian hex
-            return Some(Ipv4Addr::from(u32::from_le(gw)));
-        }
-    }
-    None
-}
 
 /// from 24 to 255.255.255.0
 pub fn cidr_to_mask(subnet: u8) -> u32 {

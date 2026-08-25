@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_variables, unused_assignments)]
 
-use crate::{error::Result, types::Mac};
+use crate::{error::Result};
+use crate::utils::Mac;
 
 use std::{
     ffi::OsStr,

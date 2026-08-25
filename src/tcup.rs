@@ -4,14 +4,15 @@ use std::time::Duration;
 use std::{collections::HashMap, net::Ipv4Addr};
 
 use crate::Error;
-use crate::arp::arp_broadcast;
 use crate::error::Result;
+use crate::eth::arp_broadcast;
 use crate::eth::{ETH_FRAME_MAX_SIZE, EthFrame, handle_frame};
 use crate::tap::TAPDevice;
 use crate::tcp::sock::Socket;
 use crate::tcp::timer::start_clock;
-use crate::types::{Mac, TCPCon};
-use crate::utils::{cidr_to_mask, get_default_gateway, setup_cap};
+use crate::types::TCPCon;
+use crate::utils::Mac;
+use crate::utils::cidr_to_mask;
 use parking_lot::{Mutex, RwLock};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
@@ -40,8 +41,6 @@ struct TCupInner {
 
 impl TCup {
     pub fn init(name: &str, addr: &str) -> Result<Self> {
-        setup_cap()?;
-
         // let tap = TAPDevice::new(name)?;
         // tap.set_if_link()?;
         // tap.set_if_addr(addr)?;

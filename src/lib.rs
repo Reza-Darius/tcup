@@ -5,7 +5,7 @@
     non_camel_case_types,
     clippy::upper_case_acronyms
 )]
-pub mod arp;
+
 pub mod error;
 pub mod eth;
 pub mod icmp;

@@ -5,7 +5,7 @@ use crate::tcup::TCup;
 use crate::{
     error::Result,
     eth::{ETH_P_ARP, Eth_hdr, EthFrame},
-    types::Mac,
+    utils::Mac,
     utils::mac_to_str,
 };
 use bytemuck::{Pod, Zeroable};

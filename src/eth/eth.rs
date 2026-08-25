@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use bytemuck::{Pod, Zeroable};
 use tracing::{debug, instrument, warn};
 
-use crate::arp::handle_arp;
+use super::handle_arp;
 use crate::error::Result;
 use crate::ip::{IP_HDR_MAXSIZE, IP_HDR_MINSIZE, IP_hdr, handle_ip_frame};
 use crate::tcp::TCP_OPT_MAX_SIZE;
@@ -12,7 +12,8 @@ use crate::tcp::{
     opts::TCP_opts,
 };
 use crate::tcup::TCup;
-use crate::types::{Mac, TCPCon};
+use crate::types::TCPCon;
+use crate::utils::Mac;
 use crate::utils::{calc_checksum_be, mac_to_str};
 
 /*
@@ -79,7 +80,7 @@ impl EthFrame {
 
     fn with_cap(cap: usize) -> Result<Self> {
         if cap == 0 {
-            return Err("capacity cant be zero".into())
+            return Err("capacity cant be zero".into());
         }
         if cap > ETH_FRAME_MAX_SIZE {
             return Err("data exceeds MTU".into());
