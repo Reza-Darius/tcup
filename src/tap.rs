@@ -1,6 +1,6 @@
 #![allow(dead_code, unused_variables, unused_assignments)]
 
-use crate::{error::Result};
+use crate::error::Result;
 use crate::utils::Mac;
 
 use std::{
@@ -16,7 +16,7 @@ use futures::TryStreamExt;
 use rtnetlink::{Handle, LinkUnspec, new_connection};
 use rustix::fs::{Mode, OFlags};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
-use tracing::trace;
+use tracing::{Level, span, trace};
 use udev::MonitorSocket;
 
 #[derive(Debug)]
@@ -38,8 +38,13 @@ impl TAPDevice {
     /// name can only be maximum 15 bytes long and should only contain ascii character
     ///
     /// can optionally be given an address and subnet
-    pub async fn new(name: impl AsRef<[u8]>, opts: TAPDeviceOptions) -> Result<Self> {
-        let name = name.as_ref();
+    pub async fn new(name: impl Into<String>, opts: TAPDeviceOptions) -> Result<Self> {
+        let name = name.into();
+        let _span = span!(Level::TRACE, "tap init", name = name).entered();
+
+        if !name.is_ascii() {
+            return Err(format!("provided name includes non ascii character").into());
+        }
 
         if name.len() > libc::IFNAMSIZ - 1 {
             return Err(format!(
@@ -53,11 +58,10 @@ impl TAPDevice {
         // we monitor udev devices to retrieve a stable MAC address later
         // the socket needs to be set up before opening the tap device!
         let monitor_sock = udev_sock()?;
-        let tap = open_tap(name)?;
+
+        let tap = open_tap(&name)?;
 
         // set up tap device
-        let name = String::from_utf8(name.to_vec())?;
-
         let (con, handler, _) = new_connection()?;
         tokio::spawn(con);
 
@@ -67,13 +71,17 @@ impl TAPDevice {
                 return Err(format!("tapdevice init error: invalid prefix, needs to be between 0 and 32, got {prefix}").into());
             }
             if_add_addr(&handler, name.clone(), addr, prefix).await?;
+
+            trace!("set ip addr");
         }
 
         if_link_up(&handler, name.clone()).await?;
+        trace!("tap device brought up");
 
         // wait for stable MAC address
         await_udev(monitor_sock, &name).await?;
         let mac = request_mac(tap.as_raw_fd(), name.as_bytes())?;
+        trace!(mac = %mac,"received mac");
 
         Ok(TAPDevice {
             name,
@@ -115,6 +123,8 @@ fn open_tap(name: impl AsRef<[u8]>) -> Result<OwnedFd> {
             return Err(std::io::Error::last_os_error().into());
         };
     }
+
+    trace!("opened tap device");
     Ok(fd)
 }
 
@@ -123,10 +133,14 @@ fn udev_sock() -> Result<MonitorSocket> {
     let socket = udev::MonitorBuilder::new()?
         .match_subsystem("net")?
         .listen()?;
+
+    trace!("set up udev sock");
     Ok(socket)
 }
 
 async fn await_udev(socket: MonitorSocket, name: impl AsRef<OsStr>) -> Result<()> {
+    trace!("awating udev");
+
     // prep a closure to iterate over the events
     let get_events = |socket: &MonitorSocket| -> io::Result<()> {
         while let Some(event) = socket.iter().next() {
@@ -146,11 +160,13 @@ async fn await_udev(socket: MonitorSocket, name: impl AsRef<OsStr>) -> Result<()
     // wrap the socket into the tokio machinery to poll it
     let async_fd = AsyncFd::new(socket)?;
     loop {
-        trace!("polling socket...");
         let mut guard = async_fd.readable().await?;
 
         match guard.try_io(|inner| get_events(inner.get_ref())) {
-            Ok(Ok(_)) => return Ok(()),
+            Ok(Ok(_)) => {
+                trace!("found device");
+                return Ok(());
+            }
 
             // TODO: this might not be ideal
             Ok(Err(e)) => break,
