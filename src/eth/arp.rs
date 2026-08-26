@@ -1,38 +1,33 @@
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 
+use crate::ip::IP_ADDR_LEN;
 use crate::tcup::TCup;
 use crate::{
     error::Result,
-    eth::{ETH_P_ARP, Eth_hdr, EthFrame},
+    eth::{Eth_hdr, EthFrame},
     utils::Mac,
     utils::mac_to_str,
 };
-use bytemuck::{Pod, Zeroable};
 use bytes::{BufMut, BytesMut};
 use tracing::{debug, info};
+use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16, Unaligned};
 
-use crate::eth::{ETH_HDR_SIZE, ETH_P_IP, ETH_P_IPV6, ETH_PAY_MIN_SIZE, IP_ADDR_LEN, MAC_ADDR_LEN};
+use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MIN_SIZE, MAC_ADDR_LEN};
 
-/* ARP protocol opcodes. */
-const ARPOP_REQUEST: u16 = 1;
-const ARPOP_REPLY: u16 = 2;
-
-/* ARP protocol HARDWARE identifiers. */
-const ARP_HRD_ETHER: u16 = 1;
 const ARP_PACKET_SIZE: usize = 28;
-
 const ARP_BROADCAST_ADDR: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 
-#[derive(Default, Clone, Copy, Pod, Zeroable)]
+#[derive(Default, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
 pub struct ArpPacket {
     // Header
-    pub hwtype: u16,    // (ar$hrd) Hardware address space
-    pub prot_type: u16, // (ar$pro) Protocol address space (EtherType field)
-    pub hwsize: u8,     // (ar$hln) byte length of each hardware address
-    pub prosize: u8,    // (ar$pln) byte length of each protocol address
-    pub opcode: u16,    // (ar$op)  opcode (ares_op$REQUEST | ares_op$REPLY)
+    pub hwtype: U16<BE>,    // (ar$hrd) Hardware address space
+    pub prot_type: U16<BE>, // (ar$pro) Protocol address space (EtherType field)
+    pub hwsize: u8,         // (ar$hln) byte length of each hardware address
+    pub prosize: u8,        // (ar$pln) byte length of each protocol address
+    pub opcode: U16<BE>,    // (ar$op)  opcode (ares_op$REQUEST | ares_op$REPLY)
+
     // Payload
     pub smac: [u8; 6], // (ar$sha) Hardware address of sender
     pub sip: [u8; 4],  // (ar$spa) Protocol address of sender
@@ -42,43 +37,127 @@ pub struct ArpPacket {
 }
 
 impl ArpPacket {
-    /// from network order bytes
-    pub fn from_be_bytes(data: &[u8; ARP_PACKET_SIZE]) -> Self {
-        let mut arp_packet: ArpPacket = bytemuck::cast(*data);
+    pub async fn new_broadcast(smac: Mac, sip: Ipv4Addr, target_ip: Ipv4Addr) -> EthFrame {
+        const PADDING: usize = ETH_PAY_MIN_SIZE - ARP_PACKET_SIZE;
+        const SIZE: usize = ETH_HDR_SIZE + ARP_PACKET_SIZE + PADDING;
 
-        arp_packet.hwtype = u16::from_be(arp_packet.hwtype);
-        arp_packet.prot_type = u16::from_be(arp_packet.prot_type);
-        arp_packet.opcode = u16::from_be(arp_packet.opcode);
+        let mut buf = Vec::with_capacity(SIZE);
 
-        arp_packet
+        let eth = Eth_hdr {
+            dmac: ARP_BROADCAST_ADDR,
+            smac: smac.octets(),
+            prot_type: libc::ETH_P_ARP as u16,
+        };
+
+        let arp = ArpPacket {
+            hwtype: libc::ARPHRD_ETHER.into(),
+            prot_type: (libc::ETH_P_IP as u16).into(),
+            hwsize: MAC_ADDR_LEN as u8,
+            prosize: IP_ADDR_LEN as u8,
+            opcode: libc::ARPOP_REQUEST.into(),
+            smac: smac.octets(),
+            sip: sip.octets(),
+            dmac: [0, 0, 0, 0, 0, 0],
+            dip: target_ip.octets(),
+        };
+
+        buf.put_slice(&eth.into_be_bytes());
+        buf.put_slice(arp.as_bytes());
+
+        debug_assert_eq!(buf.len(), SIZE);
+
+        EthFrame::from_bytes_unchecked(buf)
     }
 
-    /// converts into network order bytes
-    pub fn into_be_bytes(mut self) -> [u8; ARP_PACKET_SIZE] {
-        self.hwtype = u16::to_be(self.hwtype);
-        self.prot_type = u16::to_be(self.prot_type);
-        self.opcode = u16::to_be(self.opcode);
+    /// if we need to reply to the arp packet this function returns Some()
+    fn run_arp_check(mut self, store: &impl ArpStore) -> Option<ArpPacket> {
+        let sender_mac = Mac::from_octets(self.smac);
+        let sender_ip = Ipv4Addr::from_octets(self.sip);
 
-        bytemuck::cast(self)
+        let target_ip = Ipv4Addr::from_octets(self.dip);
+
+        let (host_mac, host_ip) = store.addr();
+
+        // NOTE: zerocopy's big endian types are overloaded to convert to native endian before
+        // comparing
+        
+        if self.hwtype != libc::ARPHRD_ETHER {
+            return None;
+        }
+
+        if self.prot_type != libc::ETH_P_IP as u16 {
+            return None;
+        }
+
+        let mut merge_flag = false;
+
+        // do we have an entry for the sender ip address?
+        //      if yes, update ip address with sender mac
+        //          set merge_flag = true
+        if store.update_if_present(sender_mac, sender_ip) {
+            merge_flag = true;
+        }
+
+        // am i the target of the ip address?
+        if target_ip != host_ip {
+            return None;
+        }
+
+        // if merge_flag = false add sender ip address with sender mac to table
+        if !merge_flag {
+            store.insert(sender_mac, sender_ip);
+        }
+
+        if self.opcode == libc::ARPOP_REPLY {
+            return None;
+        }
+
+        // if opcode == request
+        //     put my prot address and hw addres in the sender fields
+        //     set opcode to reply
+        //             send the packet away
+        if self.opcode == libc::ARPOP_REQUEST {
+            self.smac = host_mac.octets();
+            self.sip = host_ip.octets();
+
+            self.dmac = sender_mac.octets();
+            self.dip = sender_ip.octets();
+
+            self.opcode = libc::ARPOP_REPLY.into();
+
+            return Some(self)
+        }
+        None
     }
+}
+
+pub trait ArpStore {
+    /// if and only if smac and sip are in the store, update it the entry and return true
+    fn update_if_present(&self, smac: Mac, sip: Ipv4Addr) -> bool;
+
+    /// insert smac and sip as a new entry
+    fn insert(&self, smac: Mac, sip: Ipv4Addr);
+
+    /// fetch the hosts link and network address
+    fn addr(&self) -> (Mac, Ipv4Addr);
 }
 
 impl Display for ArpPacket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let hw_type = match self.hwtype {
-            ARP_HRD_ETHER => "ethernet",
+        let hw_type = match self.hwtype.get() {
+            libc::ARPHRD_ETHER => "ethernet",
             _ => return Err(std::fmt::Error),
         };
 
-        let protocol = match self.prot_type {
-            ETH_P_IP => "IPV4",
-            ETH_P_IPV6 => "IPV6",
+        let protocol = match self.prot_type.get() as i32 {
+            libc::ETH_P_IP => "IPV4",
+            libc::ETH_P_IPV6 => "IPV6",
             _ => return Err(std::fmt::Error),
         };
 
-        let op = match self.opcode {
-            ARPOP_REPLY => "Reply",
-            ARPOP_REQUEST => "Request",
+        let op = match self.opcode.get() {
+            libc::ARPOP_REPLY => "Reply",
+            libc::ARPOP_REQUEST => "Request",
             _ => unreachable!(),
         };
 
@@ -143,11 +222,11 @@ pub async fn arp_broadcast(tcup: &TCup, ip: Ipv4Addr) -> Result<()> {
     };
 
     let arp = ArpPacket {
-        hwtype: ARP_HRD_ETHER,
+        hwtype: libc::ARPHRD_ETHER,
         prot_type: ETH_P_IP,
         hwsize: MAC_ADDR_LEN as u8,
         prosize: IP_ADDR_LEN as u8,
-        opcode: ARPOP_REQUEST,
+        opcode: libc::ARPOP_REQUEST,
         smac: tcup.mac().octets(),
         sip: tcup.addr().octets(),
         dmac: [0, 0, 0, 0, 0, 0],
@@ -165,6 +244,7 @@ pub async fn arp_broadcast(tcup: &TCup, ip: Ipv4Addr) -> Result<()> {
     Ok(())
 }
 
+/// if we need to reply to the arp packet this function returns Some()
 fn run_arp_check(mut arp: ArpPacket, tcup: &TCup) -> Option<ArpPacket> {
     let sender_mac = Mac::from_octets(arp.smac);
     let sender_ip = Ipv4Addr::from_octets(arp.sip);
@@ -172,11 +252,11 @@ fn run_arp_check(mut arp: ArpPacket, tcup: &TCup) -> Option<ArpPacket> {
     let target_mac = Mac::from_octets(arp.dmac);
     let target_ip = Ipv4Addr::from_octets(arp.dip);
 
-    if arp.hwtype != ARP_HRD_ETHER {
+    if arp.hwtype != libc::ARPHRD_ETHER {
         return None;
     }
 
-    if arp.prot_type != ETH_P_IP {
+    if arp.prot_type.get() != libc::ETH_P_IP as u16 {
         return None;
     }
 
@@ -199,7 +279,7 @@ fn run_arp_check(mut arp: ArpPacket, tcup: &TCup) -> Option<ArpPacket> {
         tcup.arp_table_insert(sender_ip, sender_mac);
     }
 
-    if arp.opcode == ARPOP_REPLY {
+    if arp.opcode == libc::ARPOP_REPLY {
         return None;
     }
 
@@ -207,14 +287,14 @@ fn run_arp_check(mut arp: ArpPacket, tcup: &TCup) -> Option<ArpPacket> {
     //     put my prot address and hw addres in the sender fields
     //     set opcode to reply
     //             send the packet away
-    if arp.opcode == ARPOP_REQUEST {
+    if arp.opcode == libc::ARPOP_REQUEST {
         arp.smac = tcup.mac().octets();
         arp.sip = tcup.addr().octets();
 
         arp.dmac = sender_mac.octets();
         arp.dip = sender_ip.octets();
 
-        arp.opcode = ARPOP_REPLY;
+        arp.opcode = libc::ARPOP_REPLY.into();
 
         return Some(arp);
     }

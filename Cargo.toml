@@ -16,8 +16,9 @@ async-trait = "0.1.89"
 bincode = "2.0.0"
 bitflags = { version = "2.11.0", features = ["bytemuck", "std"] }
 bytemuck = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
+zerocopy = { version = "0.8.0" }
+zerocopy-derive = "0.8.0"
 bytes = "1.11.1"
-caps = "0.5.6"
 dashmap = "6.1.0"
 derive_more = { version = "2.1.1", features = ["full"] }
 futures = "0.3.32"

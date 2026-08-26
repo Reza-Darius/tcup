@@ -1,16 +1,18 @@
 use std::net::Ipv4Addr;
 
 use bytemuck::{Pod, Zeroable};
+use bytes::Bytes;
 use tracing::{debug, error};
 
 use crate::{
-    error::Result, eth::EthFrame, icmp::handle_icmp, tcp::handle_tcp, tcup::TCup,
+    ip::icmp::*,
+    error::Result, eth::EthFrame, tcp::handle_tcp, tcup::TCup,
     utils::calc_checksum_be,
 };
 
 pub const IP_HDR_MINSIZE: usize = 20;
 pub const IP_HDR_MAXSIZE: usize = 60;
-
+pub const IP_ADDR_LEN: usize = 4;
 pub const TOS_BEST_EFFORT: u8 = 0;
 
 pub const TTL_START: u8 = 64;
@@ -23,6 +25,7 @@ pub const IP_RF: u16 = 0x8000; // reserved
 pub const IP_DF: u16 = 0x4000; // don't fragment
 pub const IP_MF: u16 = 0x2000; // more fragments
 pub const FRAG_OFFSET_MASK: u16 = 0x1FFF;
+
 
 #[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C, packed)]

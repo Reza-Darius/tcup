@@ -25,8 +25,6 @@ pub enum Error {
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
-    Caps(#[from] caps::errors::CapsError),
-    #[error("{0}")]
     Errno(#[from] rustix::io::Errno),
     #[error("{0}")]
     Conversion(#[from] TryFromSliceError),

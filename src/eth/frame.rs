@@ -1,6 +1,7 @@
 use std::net::Ipv4Addr;
 
 use bytemuck::{Pod, Zeroable};
+use bytes::{Bytes, BytesMut};
 use tracing::{debug, instrument, warn};
 
 use super::handle_arp;
@@ -25,22 +26,32 @@ use crate::utils::{calc_checksum_be, mac_to_str};
 #define ETH_FCS_LEN	4		        /* Octets in the FCS		 */
  */
 
-const FCS_SIZE: usize = 4;
-pub const MAC_ADDR_LEN: usize = 6;
-pub const IP_ADDR_LEN: usize = 4;
-pub const ETH_FRAME_MIN_SIZE: usize = ETH_HDR_SIZE + ETH_PAY_MIN_SIZE; // min size sans FCS
-pub const ETH_FRAME_MAX_SIZE: usize = ETH_PAY_MAX_SIZE + ETH_HDR_SIZE; // max size sans FCS
-pub const ETH_HDR_SIZE: usize = 14;
-pub const ETH_PAY_MIN_SIZE: usize = 46;
-pub const ETH_PAY_MAX_SIZE: usize = 1500; // maximum payload size for a single frame (MTU)
+pub const MAC_ADDR_LEN: usize = libc::ETH_ALEN as usize;
 
-// ethernet header types (prot_type) big endian
-// EtherType fields (IEEE 802 numbers)
-pub const ETH_P_IP: u16 = 0x0800;
-pub const ETH_P_IPV6: u16 = 0x86DD;
-pub const ETH_P_ARP: u16 = 0x0806;
+/// bytes in FCS
+pub const FCS_SIZE: usize = libc::ETH_FCS_LEN as usize;
+/// min num of bytes in frame
+pub const ETH_FRAME_MIN_SIZE: usize = libc::ETH_ZLEN as usize;
+/// max size sans FCS
+pub const ETH_FRAME_MAX_SIZE: usize = libc::ETH_FRAME_LEN as usize;
 
-// offsets
+pub const ETH_HDR_SIZE: usize = libc::ETH_HLEN as usize;
+pub const ETH_PAY_MIN_SIZE: usize = ETH_FRAME_MIN_SIZE - ETH_HDR_SIZE;
+/// maximum payload size for a single frame
+pub const ETH_PAY_MAX_SIZE: usize = libc::ETH_DATA_LEN as usize;
+
+/// ethernet header types (prot_type) big endian
+/// EtherType fields (IEEE 802 numbers)
+#[repr(u16)]
+pub enum EthProt {
+    Ip = libc::ETH_P_IP as u16,
+    Ipv6 = libc::ETH_P_IPV6 as u16,
+    Arp = libc::ETH_P_ARP as u16,
+}
+
+/*
+    offsets
+*/
 const ETH_PAY_OFFSET: usize = ETH_HDR_SIZE;
 
 const IP_HDR_OFFSET: usize = ETH_HDR_SIZE;
@@ -54,7 +65,8 @@ pub const TCP_HDR_DOF_OFF: usize = 12;
 /// minimum offset
 const TCP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE + TCP_HDR_MINSIZE;
 
-// TODO: refactor this
+pub struct EthArp(Vec<u8>);
+pub struct IpPacket(Vec<u8>);
 
 #[derive(Debug, Default, Clone)]
 pub struct EthFrame {
@@ -63,6 +75,43 @@ pub struct EthFrame {
 }
 
 impl EthFrame {
+    /// converts frame into ip packet, panics if the prot field doesnt match
+    pub fn into_ip(self) -> IpPacket {
+        assert_eq!(
+            self.get_prot(),
+            EthProt::Ip as u16,
+            "attempted to convert non-ip packet"
+        );
+        IpPacket(self.data)
+    }
+
+    /// converts frame into arp packet, panics if the prot field doesnt match
+    pub fn into_arp(self) -> EthArp {
+        assert_eq!(
+            self.get_prot(),
+            EthProt::Arp as u16,
+            "attempted to convert non-arp packet"
+        );
+        EthArp(self.data)
+    }
+
+    pub fn get_prot(&self) -> u16 {
+        u16::from_be_bytes(
+            self.data[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    pub fn from_bytes_unchecked(data: impl Into<Vec<u8>>) -> Self {
+        let data = data.into();
+
+        debug_assert!(data.len() <= ETH_FRAME_MAX_SIZE);
+        debug_assert!(data.len() >= ETH_HDR_SIZE);
+
+        EthFrame { data }
+    }
+
     pub fn from_be_bytes(data: impl AsRef<[u8]>) -> Result<Self> {
         let data = data.as_ref();
         if data.len() > ETH_FRAME_MAX_SIZE {

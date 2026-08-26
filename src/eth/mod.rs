@@ -1,5 +1,5 @@
-mod eth;
+mod frame;
 mod arp;
 
-pub use eth::*;
+pub use frame::*;
 pub use arp::*;
