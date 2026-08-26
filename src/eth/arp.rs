@@ -1,24 +1,27 @@
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 
-use crate::ip::IP_ADDR_LEN;
-use crate::tcup::TCup;
-use crate::{
-    error::Result,
-    eth::{Eth_hdr, EthFrame},
-    utils::Mac,
-    utils::mac_to_str,
-};
+use super::mac::*;
+use crate::eth::{Eth_hdr, EthFrame};
+use crate::{eth::EthProt, ip::IP_ADDR_LEN};
 use bytes::BufMut;
-use tracing::{Level, info, span, trace, trace_span};
+use tracing::{Level, span, trace};
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16, Unaligned};
 
-use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MIN_SIZE, MAC_ADDR_LEN};
+use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MIN_SIZE};
 
 const ARP_PACKET_SIZE: usize = 28;
 const ARP_BROADCAST_ADDR: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 
-#[derive(Default, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+pub struct EthArp(Vec<u8>);
+
+impl From<Vec<u8>> for EthArp {
+    fn from(value: Vec<u8>) -> Self {
+        EthArp(value)
+    }
+}
+
+#[derive(Default, Clone, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
 pub struct ArpPacket {
     // Header
@@ -29,11 +32,11 @@ pub struct ArpPacket {
     pub opcode: U16<BE>,    // (ar$op)  opcode (ares_op$REQUEST | ares_op$REPLY)
 
     // Payload
-    pub smac: [u8; 6], // (ar$sha) Hardware address of sender
-    pub sip: [u8; 4],  // (ar$spa) Protocol address of sender
+    pub smac: [u8; MAC_ADDR_LEN], // (ar$sha) Hardware address of sender
+    pub sip: [u8; IP_ADDR_LEN],  // (ar$spa) Protocol address of sender
 
-    pub dmac: [u8; 6], // (ar$tha) Hardware address of target (if known)
-    pub dip: [u8; 4],  // (ar$tpa) Protocol address of target
+    pub dmac: [u8; MAC_ADDR_LEN], // (ar$tha) Hardware address of target (if known)
+    pub dip: [u8; IP_ADDR_LEN],  // (ar$tpa) Protocol address of target
 }
 
 impl ArpPacket {
@@ -43,11 +46,7 @@ impl ArpPacket {
 
         let mut buf = Vec::with_capacity(SIZE);
 
-        let eth = Eth_hdr {
-            dmac: ARP_BROADCAST_ADDR,
-            smac: smac.octets(),
-            prot_type: libc::ETH_P_ARP as u16,
-        };
+        let eth = Eth_hdr::new(ARP_BROADCAST_ADDR, smac, EthProt::Arp);
 
         let arp = ArpPacket {
             hwtype: libc::ARPHRD_ETHER.into(),
@@ -57,11 +56,11 @@ impl ArpPacket {
             opcode: libc::ARPOP_REQUEST.into(),
             smac: smac.octets(),
             sip: sip.octets(),
-            dmac: [0, 0, 0, 0, 0, 0],
+            dmac: [0; _],
             dip: target_ip.octets(),
         };
 
-        buf.put_slice(&eth.into_be_bytes());
+        buf.put_slice(&eth.as_bytes());
         buf.put_slice(arp.as_bytes());
 
         debug_assert_eq!(buf.len(), SIZE);
@@ -86,6 +85,7 @@ impl ArpPacket {
         }
 
         if self.prot_type != libc::ETH_P_IP as u16 {
+            trace!("unsupported protocol, done");
             return None;
         }
 
@@ -166,8 +166,8 @@ impl Display for ArpPacket {
             _ => unreachable!(),
         };
 
-        let src_mac = mac_to_str(&self.smac);
-        let dst_mac = mac_to_str(&self.dmac);
+        let src_mac = Mac::from_octets(self.smac);
+        let dst_mac = Mac::from_octets(self.dmac);
         let src_ip = Ipv4Addr::from_octets(self.sip);
         let dst_ip = Ipv4Addr::from_octets(self.dip);
 

@@ -151,7 +151,7 @@ impl SkCb {
 
         debug!(
             "sending frame:\nETH:\nIP:{}\nTCP:{}\n{}\n",
-            frame.get_eth_hdr(),
+            frame.hdr(),
             frame.get_ip_hdr()?,
             frame.get_tcp_hdr()?
         );

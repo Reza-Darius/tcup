@@ -5,9 +5,7 @@ use bytes::Bytes;
 use tracing::{debug, error};
 
 use crate::{
-    ip::icmp::*,
-    error::Result, eth::EthFrame, tcp::handle_tcp, tcup::TCup,
-    utils::calc_checksum_be,
+    error::Result, eth::EthFrame, ip::icmp::*, tcp::handle_tcp, tcup::TCup, utils::calc_checksum_be,
 };
 
 pub const IP_HDR_MINSIZE: usize = 20;
@@ -26,6 +24,13 @@ pub const IP_DF: u16 = 0x4000; // don't fragment
 pub const IP_MF: u16 = 0x2000; // more fragments
 pub const FRAG_OFFSET_MASK: u16 = 0x1FFF;
 
+pub struct IpPacket(Vec<u8>);
+
+impl From<Vec<u8>> for IpPacket {
+    fn from(value: Vec<u8>) -> Self {
+        IpPacket(value)
+    }
+}
 
 #[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C, packed)]

@@ -6,7 +6,7 @@ use bytemuck::{Pod, Zeroable};
 use tracing::{debug, info, trace};
 
 use crate::error::Result;
-use crate::eth::{ETH_HDR_SIZE, ETH_P_IP, ETH_PAY_MAX_SIZE, Eth_hdr, EthFrame};
+use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MAX_SIZE, Eth_hdr, EthFrame};
 use crate::ip::{IP_HDR_MINSIZE, IP_hdr, IPPROTO_ICMP, TOS_BEST_EFFORT, TTL_START};
 use crate::tcup::TCup;
 use crate::utils::calc_checksum_be;

@@ -1,6 +1,8 @@
 #[derive(Debug, Copy, Clone)]
 pub struct Mac([u8; 6]);
 
+pub const MAC_ADDR_LEN: usize = libc::ETH_ALEN as usize;
+
 impl Mac {
     pub fn new(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8) -> Self {
         Mac([a, b, c, d, e, f])
@@ -25,13 +27,6 @@ impl std::fmt::Display for Mac {
     }
 }
 
-pub fn mac_to_str(buf: &[u8; 6]) -> String {
-    format!(
-        "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
-        buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]
-    )
-}
-
 impl std::str::FromStr for Mac {
     type Err = crate::error::Error;
 
@@ -52,6 +47,20 @@ impl std::str::FromStr for Mac {
         }
 
         Ok(Mac(mac_parsed))
+    }
+}
+
+impl TryFrom<&str> for Mac {
+    type Error = crate::error::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl From<&[u8; 6]> for Mac {
+    fn from(value: &[u8; 6]) -> Self {
+        Mac::from_octets(*value)
     }
 }
 

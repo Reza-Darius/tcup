@@ -1,21 +1,19 @@
 use std::net::Ipv4Addr;
 
-use bytemuck::{Pod, Zeroable};
-use bytes::{Bytes, BytesMut};
-use tracing::{debug, instrument, warn};
+use num_enum::TryFromPrimitive;
+use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
-use super::handle_arp;
-use crate::error::Result;
-use crate::ip::{IP_HDR_MAXSIZE, IP_HDR_MINSIZE, IP_hdr, handle_ip_frame};
+use super::mac::*;
+use crate::eth::EthArp;
+use crate::eth::error::EthErr;
+use crate::ip::{IP_HDR_MAXSIZE, IP_HDR_MINSIZE, IP_hdr, IpPacket};
 use crate::tcp::TCP_OPT_MAX_SIZE;
 use crate::tcp::{
     TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_PSEUDOHDR_SIZE, hdr::PseudoHdr, hdr::TCP_hdr,
     opts::TCP_opts,
 };
-use crate::tcup::TCup;
 use crate::types::TCPCon;
-use crate::utils::Mac;
-use crate::utils::{calc_checksum_be, mac_to_str};
+use crate::utils::calc_checksum_be;
 
 /*
 #define ETH_ALEN	6		        /* Octets in one ethernet addr	 */
@@ -25,8 +23,6 @@ use crate::utils::{calc_checksum_be, mac_to_str};
 #define ETH_FRAME_LEN	1514		/* Max. octets in frame sans FCS */
 #define ETH_FCS_LEN	4		        /* Octets in the FCS		 */
  */
-
-pub const MAC_ADDR_LEN: usize = libc::ETH_ALEN as usize;
 
 /// bytes in FCS
 pub const FCS_SIZE: usize = libc::ETH_FCS_LEN as usize;
@@ -40,13 +36,16 @@ pub const ETH_PAY_MIN_SIZE: usize = ETH_FRAME_MIN_SIZE - ETH_HDR_SIZE;
 /// maximum payload size for a single frame
 pub const ETH_PAY_MAX_SIZE: usize = libc::ETH_DATA_LEN as usize;
 
-/// ethernet header types (prot_type) big endian
+/// Ethernet header types (prot_type) big endian
 /// EtherType fields (IEEE 802 numbers)
+///
+/// Only these protocols are supported
+#[derive(TryFromPrimitive, PartialEq, Clone, Copy, Debug)]
 #[repr(u16)]
 pub enum EthProt {
     Ip = libc::ETH_P_IP as u16,
-    Ipv6 = libc::ETH_P_IPV6 as u16,
     Arp = libc::ETH_P_ARP as u16,
+    // Ipv6 = libc::ETH_P_IPV6 as u16,
 }
 
 /*
@@ -65,66 +64,59 @@ pub const TCP_HDR_DOF_OFF: usize = 12;
 /// minimum offset
 const TCP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE + TCP_HDR_MINSIZE;
 
-pub struct EthArp(Vec<u8>);
-pub struct IpPacket(Vec<u8>);
-
+// when parsing between network layers we reuse the underlying buffer but change the type
 #[derive(Debug, Default, Clone)]
-pub struct EthFrame {
-    // network order bytes
-    pub data: Vec<u8>,
+pub struct EthFrame(Vec<u8>);
+
+pub enum EthFramePayload {
+    Arp(EthArp),
+    Ip(IpPacket),
 }
 
 impl EthFrame {
-    /// converts frame into ip packet, panics if the prot field doesnt match
-    pub fn into_ip(self) -> IpPacket {
-        assert_eq!(
-            self.get_prot(),
-            EthProt::Ip as u16,
-            "attempted to convert non-ip packet"
-        );
-        IpPacket(self.data)
+    pub fn parse(data: impl Into<Vec<u8>>) -> Result<EthFrame, EthErr> {
+        let data = data.into();
+
+        if data.len() > ETH_FRAME_MAX_SIZE {
+            return Err(EthErr::ParseError("data exceeds MTU size"));
+        }
+
+        if data.len() < ETH_HDR_SIZE {
+            return Err(EthErr::ParseError("data below minimumt hdr size"));
+        }
+
+        let hdr = Eth_hdr::read_from_prefix(&data)
+            .expect("a parsed frame has sufficient len")
+            .0;
+
+        let _: EthProt = hdr
+            .prot_type
+            .get()
+            .try_into()
+            .map_err(|_| EthErr::InvalidProtError)?;
+
+        Ok(EthFrame(data))
     }
 
-    /// converts frame into arp packet, panics if the prot field doesnt match
-    pub fn into_arp(self) -> EthArp {
-        assert_eq!(
-            self.get_prot(),
-            EthProt::Arp as u16,
-            "attempted to convert non-arp packet"
-        );
-        EthArp(self.data)
+    pub fn into_parts(self) -> (Eth_hdr, EthFramePayload) {
+        let hdr = self.hdr().clone();
+
+        let pay = match self.prot() {
+            EthProt::Ip => EthFramePayload::Ip(self.0.into()),
+            EthProt::Arp => EthFramePayload::Arp(self.0.into()),
+        };
+
+        (hdr, pay)
     }
 
-    pub fn get_prot(&self) -> u16 {
+    pub fn prot(&self) -> EthProt {
         u16::from_be_bytes(
             self.data[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2]
                 .try_into()
                 .unwrap(),
         )
-    }
-
-    pub fn from_bytes_unchecked(data: impl Into<Vec<u8>>) -> Self {
-        let data = data.into();
-
-        debug_assert!(data.len() <= ETH_FRAME_MAX_SIZE);
-        debug_assert!(data.len() >= ETH_HDR_SIZE);
-
-        EthFrame { data }
-    }
-
-    pub fn from_be_bytes(data: impl AsRef<[u8]>) -> Result<Self> {
-        let data = data.as_ref();
-        if data.len() > ETH_FRAME_MAX_SIZE {
-            return Err("data exceeds MTU".into());
-        }
-
-        if data.len() < ETH_HDR_SIZE {
-            return Err("data below minimum eth hdr size".into());
-        }
-
-        Ok(EthFrame {
-            data: Vec::from(data),
-        })
+        .try_into()
+        .expect("unable to read a support prot from eth frame")
     }
 
     fn with_cap(cap: usize) -> Result<Self> {
@@ -152,7 +144,7 @@ impl EthFrame {
     ) -> Result<Self> {
         let mut packet = EthFrame::with_cap(ETH_HDR_SIZE + ip_hdr.tot_len as usize)?;
 
-        packet.set_eth_hdr(eth_hdr);
+        packet.set_eth_hdr(&eth_hdr);
         packet.set_ip_hdr(ip_hdr)?;
         packet.set_tcp_hdr(tcp_hdr)?;
         packet.set_tcp_opts(tcp_opts)?;
@@ -193,16 +185,22 @@ impl EthFrame {
         res
     }
 
-    pub fn get_eth_hdr(&self) -> Eth_hdr {
-        Eth_hdr::from_be_bytes(
-            self.data[..ETH_HDR_SIZE]
-                .try_into()
-                .expect("we never have a frame without a header"),
-        )
+    pub fn hdr(&self) -> &Eth_hdr {
+        Eth_hdr::ref_from_prefix(&self.data)
+            .expect("a parsed frame has sufficient len")
+            .0
+        // Eth_hdr::from_be_bytes(
+        //     self.data[..ETH_HDR_SIZE]
+        //         .try_into()
+        //         .expect("we never have a frame without a header"),
+        // )
     }
 
-    pub fn set_eth_hdr(&mut self, hdr: Eth_hdr) {
-        self.data.as_mut_slice()[..ETH_HDR_SIZE].copy_from_slice(&hdr.into_be_bytes());
+    pub fn set_eth_hdr(&mut self, hdr: &Eth_hdr) {
+        hdr.as_bytes()
+            .write_to_prefix(self.data.as_mut_slice())
+            .expect("parsed frame has sufficient len");
+        // self.data.as_mut_slice()[..ETH_HDR_SIZE].copy_from_slice(&hdr.into_be_bytes());
     }
 
     pub fn get_eth_pay(&self) -> &[u8] {
@@ -480,24 +478,26 @@ impl EthFrame {
     }
 }
 
-#[derive(Debug, Default, Pod, Zeroable, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C, packed)]
 pub struct Eth_hdr {
     pub dmac: [u8; MAC_ADDR_LEN], // dest MAC address
     pub smac: [u8; MAC_ADDR_LEN], // src MAC address
-    pub prot_type: u16,
+    pub prot_type: U16<BE>,
 }
 
 impl std::fmt::Display for Eth_hdr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let dest_mac = mac_to_str(&self.dmac);
-        let source_mac = mac_to_str(&self.smac);
-        let hrd_type = match self.prot_type {
-            ETH_P_IP => String::from("IPV4"),
-            ETH_P_IPV6 => String::from("IPV6"),
-            ETH_P_ARP => String::from("ARP"),
+        let dest_mac = Mac::from_octets(self.dmac);
+        let source_mac = Mac::from_octets(self.smac);
+
+        let hrd_type = match self.prot_type.get() as i32 {
+            libc::ETH_P_IP => String::from("IPV4"),
+            libc::ETH_P_IPV6 => String::from("IPV6"),
+            libc::ETH_P_ARP => String::from("ARP"),
             n => n.to_string(),
         };
+
         write!(
             f,
             "dmac: {}, smac: {}, typer: {}",
@@ -507,48 +507,35 @@ impl std::fmt::Display for Eth_hdr {
 }
 
 impl Eth_hdr {
-    pub fn new(dmac: Mac, smac: Mac, eth_type: u16) -> Self {
+    pub fn new(dmac: impl Into<Mac>, smac: impl Into<Mac>, prot_type: EthProt) -> Self {
         Eth_hdr {
-            dmac: dmac.octets(),
-            smac: smac.octets(),
-            prot_type: eth_type,
+            dmac: dmac.into().octets(),
+            smac: smac.into().octets(),
+            prot_type: zerocopy::U16::<BE>::new(prot_type as u16),
         }
-    }
-
-    /// from network order bytes
-    pub fn from_be_bytes(buf: &[u8; ETH_HDR_SIZE]) -> Self {
-        let mut hdr: Eth_hdr = bytemuck::cast(*buf);
-        hdr.prot_type = u16::from_be(hdr.prot_type);
-        hdr
-    }
-
-    /// into network order bytes
-    pub fn into_be_bytes(mut self) -> [u8; ETH_HDR_SIZE] {
-        self.prot_type = u16::to_be(self.prot_type);
-        bytemuck::cast(self)
     }
 }
 
-#[instrument(skip_all, err)]
-pub async fn handle_frame(inc: EthFrame, tcup: TCup) -> Result<()> {
-    let hdr = inc.get_eth_hdr();
-    debug!("handling eth {}", hdr);
-
-    // TODO: handle ip datagrams not directed at us
-
-    match hdr.prot_type {
-        ETH_P_IP => {
-            handle_ip_frame(inc, tcup).await?;
-        }
-        ETH_P_ARP => {
-            handle_arp(inc, tcup).await?;
-        }
-        ETH_P_IPV6 => (),
-        _ => {
-            warn!("IpV6 is not supported, dropping frame");
-            return Ok(());
-        }
-    };
-
-    Ok(())
-}
+// #[instrument(skip_all, err)]
+// pub async fn handle_frame(inc: EthFrame, tcup: TCup) -> Result<()> {
+//     let hdr = inc.get_eth_hdr();
+//     debug!("handling eth {}", hdr);
+//
+//     // TODO: handle ip datagrams not directed at us
+//
+//     match hdr.prot_type {
+//         ETH_P_IP => {
+//             handle_ip_frame(inc, tcup).await?;
+//         }
+//         ETH_P_ARP => {
+//             handle_arp(inc, tcup).await?;
+//         }
+//         ETH_P_IPV6 => (),
+//         _ => {
+//             warn!("IpV6 is not supported, dropping frame");
+//             return Ok(());
+//         }
+//     };
+//
+//     Ok(())
+// }
