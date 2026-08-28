@@ -9,11 +9,10 @@
 pub mod error;
 pub mod eth;
 pub mod ip;
-pub mod ipc;
+// pub mod ipc;
 pub mod tap;
-pub mod tcp;
-pub mod tcup;
-pub mod types;
+// pub mod tcp;
+// pub mod server;
 pub mod utils;
 
-pub use error::{Error, Result};
+// pub use error::{Error, Result};

@@ -15,7 +15,7 @@ use tokio::sync::mpsc::channel;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::error::SocketError;
-use crate::eth::EthFrame;
+use crate::eth::EthPacket;
 use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_PAY_MAX_SIZE};
 use crate::ip::{IP_HDR_MINSIZE, IP_hdr};
 use crate::tcp::{
@@ -40,7 +40,7 @@ pub const WND_SIZE: u16 = 10000;
 pub const CHAN_BUF_SIZE: usize = ETH_FRAME_MAX_SIZE * 100;
 pub const SYN_ACK_RETRIES: u64 = 5;
 
-pub async fn handle_tcp(inc: EthFrame, tcup: TCup) -> Result<()> {
+pub async fn handle_tcp(inc: EthPacket, tcup: TCup) -> Result<()> {
     let ip_hdr = inc.get_ip_hdr()?;
     let tcp_hdr = inc.get_tcp_hdr()?;
 

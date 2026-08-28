@@ -1,6 +1,3 @@
-use crate::error::Result;
-use std::{io, net::Ipv4Addr};
-
 /// assumes network order bytes
 pub fn calc_checksum_be(bytes: &[u8]) -> u16 {
     let mut sum: u32 = 0;
@@ -58,7 +55,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checksum() -> Result<()> {
+    fn checksum() {
         // Example 1: normal order (BE)
         let ex1: [u8; 8] = [0x00, 0x01, 0xF2, 0x03, 0xF4, 0xF5, 0xF6, 0xF7];
 
@@ -73,6 +70,5 @@ mod tests {
         assert_eq!(expected, !calc_checksum_be(&ex1));
         // assert_eq!(expected, !calc_checksum_le(&ex2));
         // assert_eq!(expected, calc_checksum(&ex3).swap_bytes());
-        Ok(())
     }
 }

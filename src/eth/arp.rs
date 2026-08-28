@@ -2,53 +2,56 @@ use std::fmt::Display;
 use std::net::Ipv4Addr;
 
 use super::mac::*;
-use crate::eth::{Eth_hdr, EthFrame};
-use crate::{eth::EthProt, ip::IP_ADDR_LEN};
+use crate::eth::error::EthErr;
+use crate::ip::IP_ADDR_LEN;
+use crate::utils::packet::*;
 use bytes::BufMut;
 use tracing::{Level, span, trace};
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16, Unaligned};
 
 use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MIN_SIZE};
 
-const ARP_PACKET_SIZE: usize = 28;
-const ARP_BROADCAST_ADDR: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+const ARP_PACKET_SIZE: usize = std::mem::size_of::<ArpMsg>();
 
-pub struct EthArp(Vec<u8>);
+impl Packet<Arp> {
+    pub fn parse(eth: Packet<Eth>) -> Result<Self, EthErr> {
+        let data = eth.into_vec();
+        let arp = ArpMsg::ref_from_prefix(&data[ETH_HDR_SIZE..])
+            .map_err(|_| EthErr::ParseError("arp parse error"))?
+            .0;
 
-impl From<Vec<u8>> for EthArp {
-    fn from(value: Vec<u8>) -> Self {
-        EthArp(value)
+        // we validate fields during arp
+
+        Ok(data.into())
     }
-}
 
-#[derive(Default, Clone, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C, packed)]
-pub struct ArpPacket {
-    // Header
-    pub hwtype: U16<BE>,    // (ar$hrd) Hardware address space
-    pub prot_type: U16<BE>, // (ar$pro) Protocol address space (EtherType field)
-    pub hwsize: u8,         // (ar$hln) byte length of each hardware address
-    pub prosize: u8,        // (ar$pln) byte length of each protocol address
-    pub opcode: U16<BE>,    // (ar$op)  opcode (ares_op$REQUEST | ares_op$REPLY)
+    pub fn hdr(&self) -> ArpMsg {
+        ArpMsg::read_from_prefix(&self.data[ETH_HDR_SIZE..])
+            .expect("the packet is validated already")
+            .0
+    }
 
-    // Payload
-    pub smac: [u8; MAC_ADDR_LEN], // (ar$sha) Hardware address of sender
-    pub sip: [u8; IP_ADDR_LEN],  // (ar$spa) Protocol address of sender
+    pub fn set_hdr(&mut self, hdr: ArpMsg) {
+        hdr.write_to_prefix(&mut self.data[ETH_HDR_SIZE..])
+            .expect("the packet is validated already")
+    }
 
-    pub dmac: [u8; MAC_ADDR_LEN], // (ar$tha) Hardware address of target (if known)
-    pub dip: [u8; IP_ADDR_LEN],  // (ar$tpa) Protocol address of target
-}
-
-impl ArpPacket {
-    pub async fn new_broadcast(smac: Mac, sip: Ipv4Addr, target_ip: Ipv4Addr) -> EthFrame {
+    /// allocates a new arp message
+    pub fn new(packet: ArpMsg) -> Self {
         const PADDING: usize = ETH_PAY_MIN_SIZE - ARP_PACKET_SIZE;
+        // we include padding to get to the required minimum ethernet size
         const SIZE: usize = ETH_HDR_SIZE + ARP_PACKET_SIZE + PADDING;
 
-        let mut buf = Vec::with_capacity(SIZE);
+        let mut v = vec![0u8; SIZE];
 
-        let eth = Eth_hdr::new(ARP_BROADCAST_ADDR, smac, EthProt::Arp);
+        v.put_slice(&[0; ETH_HDR_SIZE]);
+        v.put_slice(packet.as_bytes());
 
-        let arp = ArpPacket {
+        v.into()
+    }
+
+    pub fn new_request(smac: Mac, sip: Ipv4Addr, target_ip: Ipv4Addr) -> Packet<Eth> {
+        let arp = ArpMsg {
             hwtype: libc::ARPHRD_ETHER.into(),
             prot_type: (libc::ETH_P_IP as u16).into(),
             hwsize: MAC_ADDR_LEN as u8,
@@ -60,36 +63,33 @@ impl ArpPacket {
             dip: target_ip.octets(),
         };
 
-        buf.put_slice(&eth.as_bytes());
-        buf.put_slice(arp.as_bytes());
-
-        debug_assert_eq!(buf.len(), SIZE);
-
-        EthFrame::from_bytes_unchecked(buf)
+        Packet::<Eth>::new(Mac::BROADCAST, smac, Packet::<Arp>::new(arp).into())
+            .expect("the values are hard coded")
     }
 
-    /// if we need to reply to the arp packet this function returns Some()
-    fn run_arp_check(mut self, host: &mut impl ArpStore) -> Option<ArpPacket> {
-        let sender_mac = Mac::from_octets(self.smac);
-        let sender_ip = Ipv4Addr::from_octets(self.sip);
-        let target_ip = Ipv4Addr::from_octets(self.dip);
+    pub fn run_arp_check(mut self, host: &mut impl ArpStore) -> Option<Packet<Eth>> {
+        let mut arp_packet = self.hdr();
+
+        let sender_mac = Mac::from_octets(arp_packet.smac);
+        let sender_ip = Ipv4Addr::from_octets(arp_packet.sip);
+        let target_ip = Ipv4Addr::from_octets(arp_packet.dip);
+        let mut merge_flag = false;
+        let (host_mac, host_ip) = host.addr();
 
         let _span = span!(Level::TRACE, "arp", smac = %sender_mac, sip = %sender_ip, target_ip = %target_ip).entered();
-        let (host_mac, host_ip) = host.addr();
 
         // NOTE: zerocopy's big endian types are overloaded to convert to native endian before
         // comparing
 
-        if self.hwtype != libc::ARPHRD_ETHER {
+        if arp_packet.hwtype != libc::ARPHRD_ETHER {
+            trace!("unsupported hw protocol, done");
             return None;
         }
 
-        if self.prot_type != libc::ETH_P_IP as u16 {
-            trace!("unsupported protocol, done");
+        if arp_packet.prot_type != libc::ETH_P_IP as u16 {
+            trace!("unsupported network protocol, done");
             return None;
         }
-
-        let mut merge_flag = false;
 
         // do we have an entry for the sender ip address?
         //      if yes, update ip address with sender mac
@@ -111,7 +111,7 @@ impl ArpPacket {
             trace!("inserted arp entry");
         }
 
-        if self.opcode == libc::ARPOP_REPLY {
+        if arp_packet.opcode == libc::ARPOP_REPLY {
             trace!("arp packet is reply, done");
             return None;
         }
@@ -120,21 +120,46 @@ impl ArpPacket {
         //     put my prot address and hw addres in the sender fields
         //     set opcode to reply
         //             send the packet away
-        if self.opcode == libc::ARPOP_REQUEST {
-            self.smac = host_mac.octets();
-            self.sip = host_ip.octets();
+        if arp_packet.opcode == libc::ARPOP_REQUEST {
+            arp_packet.smac = host_mac.octets();
+            arp_packet.sip = host_ip.octets();
 
-            self.dmac = sender_mac.octets();
-            self.dip = sender_ip.octets();
+            arp_packet.dmac = sender_mac.octets();
+            arp_packet.dip = sender_ip.octets();
 
-            self.opcode = libc::ARPOP_REPLY.into();
+            arp_packet.opcode = libc::ARPOP_REPLY.into();
 
             trace!("generated arp reply");
-            return Some(self);
+
+            self.set_hdr(arp_packet);
+
+            return Some(
+                Packet::<Eth>::new(sender_mac, host_mac, self.into())
+                    .expect("the values are hard coded"),
+            );
         }
         None
     }
 }
+
+#[derive(Default, Clone, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+pub struct ArpMsg {
+    // Header
+    pub hwtype: U16<BE>,    // (ar$hrd) Hardware address space
+    pub prot_type: U16<BE>, // (ar$pro) Protocol address space (EtherType field)
+    pub hwsize: u8,         // (ar$hln) byte length of each hardware address
+    pub prosize: u8,        // (ar$pln) byte length of each protocol address
+    pub opcode: U16<BE>,    // (ar$op)  opcode (ares_op$REQUEST | ares_op$REPLY)
+
+    // Payload
+    pub smac: [u8; MAC_ADDR_LEN], // (ar$sha) Hardware address of sender
+    pub sip: [u8; IP_ADDR_LEN],   // (ar$spa) Protocol address of sender
+    pub dmac: [u8; MAC_ADDR_LEN], // (ar$tha) Hardware address of target (if known)
+    pub dip: [u8; IP_ADDR_LEN],   // (ar$tpa) Protocol address of target
+}
+
+impl ArpMsg {}
 
 pub trait ArpStore {
     /// if and only if smac and sip are in the store, update it the entry and return true
@@ -147,7 +172,7 @@ pub trait ArpStore {
     fn addr(&self) -> (Mac, Ipv4Addr);
 }
 
-impl Display for ArpPacket {
+impl Display for ArpMsg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let hw_type = match self.hwtype.get() {
             libc::ARPHRD_ETHER => "ethernet",
@@ -171,23 +196,7 @@ impl Display for ArpPacket {
         let src_ip = Ipv4Addr::from_octets(self.sip);
         let dst_ip = Ipv4Addr::from_octets(self.dip);
 
-        write!(
-            f,
-            "\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n{:<15} {:>10}\n",
-            "hw type",
-            hw_type,
-            "protocol",
-            protocol,
-            "opcode",
-            op,
-            "src mac",
-            src_mac,
-            "src ip",
-            src_ip,
-            "dst mac",
-            dst_mac,
-        )?;
-        writeln!(f, "{:<15} {:>10}", "dst ip", dst_ip)
+        write!(f, "hw type: {hw_type}, prot: {protocol}, opcode: {op}, src_mac: {src_mac}, src_ip: {src_ip}, dst_mac {dst_mac}, dst_ip {dst_ip}\n")
     }
 }
 

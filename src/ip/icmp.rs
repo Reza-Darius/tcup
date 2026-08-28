@@ -6,7 +6,7 @@ use bytemuck::{Pod, Zeroable};
 use tracing::{debug, info, trace};
 
 use crate::error::Result;
-use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MAX_SIZE, Eth_hdr, EthFrame};
+use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MAX_SIZE, EthHdr, EthPacket};
 use crate::ip::{IP_HDR_MINSIZE, IP_hdr, IPPROTO_ICMP, TOS_BEST_EFFORT, TTL_START};
 use crate::tcup::TCup;
 use crate::utils::calc_checksum_be;
@@ -93,7 +93,7 @@ impl Unreachable {
     }
 }
 
-pub async fn handle_icmp(inc: EthFrame, tcup: TCup) -> Result<()> {
+pub async fn handle_icmp(inc: EthPacket, tcup: TCup) -> Result<()> {
     let ip_payload = inc.get_ip_pay()?;
 
     if ip_payload.len() < ICMP_HDR_SIZE {
@@ -115,7 +115,7 @@ pub async fn handle_icmp(inc: EthFrame, tcup: TCup) -> Result<()> {
     }
 }
 
-async fn handle_echo_req(req: EthFrame, tcup: TCup) -> Result<()> {
+async fn handle_echo_req(req: EthPacket, tcup: TCup) -> Result<()> {
     debug!("handling echo request");
 
     let req_ip_hdr = req.get_ip_hdr()?;
@@ -167,7 +167,7 @@ async fn handle_echo_req(req: EthFrame, tcup: TCup) -> Result<()> {
 
     // build IP packet
     let mut reply: Vec<u8> = Vec::with_capacity(ETH_HDR_SIZE + req_ip_hdr.tot_len as usize);
-    let rep_eth_hdr = Eth_hdr::new(dest_mac, tcup.mac(), ETH_P_IP);
+    let rep_eth_hdr = EthHdr::new(dest_mac, tcup.mac(), ETH_P_IP);
 
     reply.extend_from_slice(&rep_eth_hdr.into_be_bytes());
     reply.extend_from_slice(&rep_ip_hdr.into_be_bytes());
@@ -175,7 +175,7 @@ async fn handle_echo_req(req: EthFrame, tcup: TCup) -> Result<()> {
 
     assert_eq!(reply.len(), ETH_HDR_SIZE + req_ip_hdr.tot_len as usize);
 
-    let frame = EthFrame { data: reply };
+    let frame = EthPacket { data: reply };
 
     debug!("reply eth:\n{}", rep_eth_hdr);
     debug!("reply ip:\n{}", rep_ip_hdr);

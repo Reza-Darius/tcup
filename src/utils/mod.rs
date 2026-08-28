@@ -1,9 +1,9 @@
 mod checksum;
-mod mac;
 mod gateway;
+mod offsets;
+pub mod packet;
 
 pub use checksum::*;
-pub use mac::*;
 pub use gateway::*;
 
 

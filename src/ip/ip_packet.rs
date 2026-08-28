@@ -1,11 +1,15 @@
 use std::net::Ipv4Addr;
 
-use bytemuck::{Pod, Zeroable};
-use bytes::Bytes;
 use tracing::{debug, error};
+use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
+use crate::eth::EthHdr;
+use crate::utils::packet::*;
 use crate::{
-    error::Result, eth::EthFrame, ip::icmp::*, tcp::handle_tcp, tcup::TCup, utils::calc_checksum_be,
+    eth::ETH_HDR_SIZE,
+    ip::{error::IpErr, icmp::*},
+    tcp::{TCP_HDR_MINSIZE, handle_tcp},
+    utils::{calc_checksum_be, packet::Packet},
 };
 
 pub const IP_HDR_MINSIZE: usize = 20;
@@ -24,53 +28,146 @@ pub const IP_DF: u16 = 0x4000; // don't fragment
 pub const IP_MF: u16 = 0x2000; // more fragments
 pub const FRAG_OFFSET_MASK: u16 = 0x1FFF;
 
-pub struct IpPacket(Vec<u8>);
+const IP_HDR_OFFSET: usize = ETH_HDR_SIZE;
+const IP_CHECK_OFFSET: usize = ETH_HDR_SIZE + 10;
+/// minimum offset
+const IP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
 
-impl From<Vec<u8>> for IpPacket {
-    fn from(value: Vec<u8>) -> Self {
-        IpPacket(value)
+const TCP_HDR_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
+const TCP_CHECK_OFFSET_FROM_HDR: usize = 16;
+pub const TCP_HDR_DOF_OFF: usize = 12;
+/// minimum offset
+const TCP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE + TCP_HDR_MINSIZE;
+
+impl Packet<Ipv4> {
+    pub fn parse(pck: Packet<Eth>) -> Result<Self, IpErr> {
+        todo!()
+    }
+
+    pub fn into_parts(self) -> Result<(IP_hdr, Ipv4Payload), IpErr> {
+        todo!()
+    }
+
+    pub fn to_eth(hdr: EthHdr) -> Packet<Eth> {
+        todo!()
+    }
+
+    fn iphdr_size(&self) -> usize {
+        let res = ((self.data[ETH_HDR_SIZE] & 0x0F) << 2) as usize;
+        assert!((IP_HDR_MINSIZE..=IP_HDR_MAXSIZE).contains(&res));
+        res
+    }
+
+    pub fn hdr(&self) -> IP_hdr {
+        IP_hdr::from_be_bytes(
+            self.data[IP_HDR_OFFSET..IP_HDR_OFFSET + IP_HDR_MINSIZE].try_into()?,
+        )
+    }
+
+    pub fn get_ip_hdr(&self) -> IP_hdr {
+        if self.data.len() < IP_HDR_OFFSET + IP_HDR_MINSIZE {
+            return Err("not enough data to retrieve IP header".into());
+        }
+
+        Ok(IP_hdr::from_be_bytes(
+            self.0[IP_HDR_OFFSET..IP_HDR_OFFSET + IP_HDR_MINSIZE].try_into()?,
+        ))
+    }
+
+    pub fn set_ip_hdr(&mut self, hdr: IP_hdr) -> Result<()> {
+        let lo = IP_HDR_OFFSET;
+        let hi = IP_HDR_OFFSET + IP_HDR_MINSIZE;
+
+        if self.0.len() < hi {
+            return Err("data too small to write IP hdr".into());
+        }
+
+        // currently doesnt support IP options
+        assert_eq!(
+            hdr.len(),
+            IP_HDR_MINSIZE,
+            "ip options arent supported currently"
+        );
+
+        self.0.as_mut_slice()[lo..hi].copy_from_slice(&hdr.into_be_bytes());
+
+        Ok(())
+    }
+
+    pub fn set_ip_check(&mut self) -> Result<()> {
+        if self.len() < IP_CHECK_OFFSET + 1 {
+            return Err("cant set ip checksum, len is too small".into());
+        }
+
+        let offset = IP_CHECK_OFFSET;
+
+        // setting to 0 before calculation
+        self.0[offset] = 0;
+        self.0[offset + 1] = 0;
+
+        let check = calc_checksum_be(&self.0[ETH_HDR_SIZE..ETH_HDR_SIZE + self.iphdr_size()]);
+        self.0[offset..offset + size_of::<u16>()].copy_from_slice(&u16::to_be_bytes(check));
+
+        assert_eq!(
+            0,
+            calc_checksum_be(&self.0[ETH_HDR_SIZE..ETH_HDR_SIZE + self.iphdr_size()]),
+            "checksum failed"
+        );
+
+        Ok(())
+    }
+
+    pub fn get_ip_pay(&self) -> Result<&[u8]> {
+        let offset = ETH_HDR_SIZE + self.iphdr_size();
+
+        if self.len() < offset {
+            return Err("no IP payload found".into());
+        }
+
+        Ok(&self.0.as_slice()[offset..])
+    }
+
+    pub fn get_ip_pay_mut(&mut self) -> Result<&mut [u8]> {
+        let offset = ETH_HDR_SIZE + self.iphdr_size();
+        if self.len() < offset {
+            return Err("no IP payload found".into());
+        }
+
+        Ok(&mut self.0.as_mut_slice()[offset..])
+    }
+
+    /// overwrites the IP payload of the frame with data
+    pub fn set_ip_pay(&mut self, data: &[u8]) -> Result<()> {
+        let offset = ETH_HDR_SIZE + self.iphdr_size();
+
+        if offset + data.len() > ETH_FRAME_MAX_SIZE {
+            return Err("data exceeds MTU".into());
+        }
+
+        self.0.truncate(offset);
+        self.0.extend_from_slice(data);
+
+        Ok(())
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]
+#[derive(Default, Debug, Clone, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C, packed)]
 pub struct IP_hdr {
     pub ver_ihl: u8,  // 4 bits for version and IHL (internet header length)
     pub tos: u8,      // type of service
-    pub tot_len: u16, // length of the whole IP datagram
-    pub id: u16,
-    pub frag_off: u16, // first 3 bits are flags, rest offset
+    pub tot_len: U16<BE>, // length of the whole IP datagram
+    pub id: U16<BE>,
+    pub frag_off: U16<BE>, // first 3 bits are flags, rest offset
     pub ttl: u8,       // time to live
     pub prot: u8,
-    pub checksum: u16, // only covers the IP header
+    pub checksum: U16<BE>, // only covers the IP header
 
     pub src_addr: [u8; 4],
     pub dest_addr: [u8; 4],
 }
 
 impl IP_hdr {
-    /// from network order bytes
-    pub fn from_be_bytes(bytes: &[u8; IP_HDR_MINSIZE]) -> Self {
-        let mut hdr: IP_hdr = bytemuck::cast(*bytes);
-
-        hdr.tot_len = u16::from_be(hdr.tot_len);
-        hdr.id = u16::from_be(hdr.id);
-        hdr.checksum = u16::from_be(hdr.checksum);
-        hdr.frag_off = u16::from_be(hdr.frag_off);
-
-        hdr
-    }
-
-    /// into network order bytes
-    pub fn into_be_bytes(mut self) -> [u8; IP_HDR_MINSIZE] {
-        self.tot_len = u16::to_be(self.tot_len);
-        self.id = u16::to_be(self.id);
-        self.checksum = u16::to_be(self.checksum);
-        self.frag_off = u16::to_be(self.frag_off);
-
-        bytemuck::cast(self)
-    }
-
     /// sets the header size, takes the length in bytes as argument
     pub fn set_ihl(&mut self, len: usize) -> Result<()> {
         if len > IP_HDR_MAXSIZE {
@@ -141,18 +238,18 @@ impl std::fmt::Display for IP_hdr {
     }
 }
 
-pub async fn handle_ip_frame(inc: EthFrame, tcup: TCup) -> Result<()> {
-    let eth_pay = inc.get_eth_pay();
-    let ip_hdr = check_ip_packet(eth_pay)?;
-
-    debug!("handling IP packet\n{}", ip_hdr);
-
-    match ip_hdr.prot {
-        IPPROTO_ICMP => handle_icmp(inc, tcup).await,
-        IPPROTO_TCP => handle_tcp(inc, tcup).await,
-        _ => Err("IP protocol not supported".into()),
-    }
-}
+// pub async fn handle_ip_frame(inc: EthPacket, tcup: TCup) -> Result<()> {
+//     let eth_pay = inc.payload();
+//     let ip_hdr = check_ip_packet(eth_pay)?;
+//
+//     debug!("handling IP packet\n{}", ip_hdr);
+//
+//     match ip_hdr.prot {
+//         IPPROTO_ICMP => handle_icmp(inc, tcup).await,
+//         IPPROTO_TCP => handle_tcp(inc, tcup).await,
+//         _ => Err("IP protocol not supported".into()),
+//     }
+// }
 
 fn check_ip_packet(eth_pay: &[u8]) -> Result<IP_hdr> {
     if eth_pay.len() < IP_HDR_MINSIZE {
