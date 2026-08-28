@@ -12,4 +12,6 @@ pub enum EthErr {
     IpError(#[from] IpErr),
     #[error("unsupported eternet protocol")]
     InvalidProtError,
+    #[error("{0}")]
+    ConversionError(String),
 }

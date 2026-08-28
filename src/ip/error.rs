@@ -6,4 +6,8 @@ pub enum IpErr {
     ParseError(String),
     #[error("unsupported protocol")]
     InvalidProtError,
+    #[error("{0}")]
+    HeaderError(String),
+    #[error("{0}")]
+    ConversionError(String),
 }

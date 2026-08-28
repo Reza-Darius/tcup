@@ -7,7 +7,7 @@ use tracing::{debug, info, trace};
 
 use crate::error::Result;
 use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MAX_SIZE, EthHdr, EthPacket};
-use crate::ip::{IP_HDR_MINSIZE, IP_hdr, IPPROTO_ICMP, TOS_BEST_EFFORT, TTL_START};
+use crate::ip::{IP_HDR_MINSIZE, IPv4Hdr, IPPROTO_ICMP, TOS_BEST_EFFORT, TTL_START};
 use crate::tcup::TCup;
 use crate::utils::calc_checksum_be;
 
@@ -145,7 +145,7 @@ async fn handle_echo_req(req: EthPacket, tcup: TCup) -> Result<()> {
 
     assert_eq!(0, calc_checksum_be(&icmp_buf[..pay_offset]));
 
-    let mut rep_ip_hdr = IP_hdr {
+    let mut rep_ip_hdr = IPv4Hdr {
         tos: TOS_BEST_EFFORT,
         tot_len: req_ip_hdr.tot_len,
         id: req_ip_hdr.id,

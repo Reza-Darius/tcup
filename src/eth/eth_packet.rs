@@ -54,7 +54,7 @@ impl Packet<Eth> {
         }
 
         let hdr = EthHdr::read_from_prefix(&data)
-            .expect("a parsed frame has sufficient len")
+            .expect("eth parse: we checked the len")
             .0;
 
         let _: EthProt = hdr
@@ -79,12 +79,12 @@ impl Packet<Eth> {
 
     pub fn prot(&self) -> EthProt {
         u16::from_be_bytes(
-            self.data[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2]
+            self.as_bytes()[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2]
                 .try_into()
-                .expect("packet is parsed and has the required length"),
+                .expect("get eth prot: packet is parsed and has the required length"),
         )
         .try_into()
-        .expect("unable to read a support prot from eth frame")
+        .expect("get eth prot: eth eth packet is parsed")
     }
 
     /// construct a new frame, this reuses the payload allocation
@@ -98,11 +98,11 @@ impl Packet<Eth> {
             EthPayload::Arp(packet) => {
                 prot = EthProt::Arp;
                 packet.into_vec()
-            },
+            }
             EthPayload::Ip(packet) => {
                 prot = EthProt::Ip;
                 packet.into_vec()
-            },
+            }
         };
 
         let hdr = EthHdr::new(dmac, smac, prot);
@@ -117,17 +117,13 @@ impl Packet<Eth> {
 
         hdr.as_bytes()
             .write_to_prefix(&mut data)
-            .expect("parsed frame has sufficient len");
+            .expect("eth new: parsed frame has sufficient len");
 
         Ok(Packet::from_vec(data))
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        self.data.as_ref()
-    }
-
     pub fn hdr(&self) -> &EthHdr {
-        EthHdr::ref_from_prefix(&self.data)
+        EthHdr::ref_from_prefix(&self.as_bytes())
             .expect("a parsed frame has sufficient len")
             .0
         // Eth_hdr::from_be_bytes(
@@ -138,7 +134,7 @@ impl Packet<Eth> {
     }
 
     pub fn payload(&self) -> &[u8] {
-        &self.data.as_slice()[ETH_PAY_OFFSET..]
+        &self.as_bytes()[ETH_PAY_OFFSET..]
     }
 
     // fn with_cap(cap: usize) -> Result<Self> {
@@ -178,6 +174,7 @@ impl Packet<Eth> {
     // }
 }
 
+#[derive(Debug)]
 pub enum EthPayload {
     Arp(Packet<Arp>),
     Ip(Packet<Ipv4>),
@@ -256,3 +253,181 @@ impl EthHdr {
 //
 //     Ok(())
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eth::arp::ArpMsg;
+    use std::net::Ipv4Addr;
+
+    const DMAC: [u8; MAC_ADDR_LEN] = [0xAA; MAC_ADDR_LEN];
+    const SMAC: [u8; MAC_ADDR_LEN] = [0xBB; MAC_ADDR_LEN];
+
+    fn valid_arp_eth_bytes() -> Vec<u8> {
+        Packet::<Arp>::new_request(
+            Mac::from_octets(SMAC),
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(10, 0, 0, 1),
+        )
+        .into_vec()
+    }
+
+    fn dummy_arp_msg() -> ArpMsg {
+        ArpMsg {
+            hwtype: libc::ARPHRD_ETHER.into(),
+            prot_type: (libc::ETH_P_IP as u16).into(),
+            hwsize: MAC_ADDR_LEN as u8,
+            prosize: 4,
+            opcode: libc::ARPOP_REQUEST.into(),
+            smac: SMAC,
+            sip: [10, 0, 0, 2],
+            dmac: [0; MAC_ADDR_LEN],
+            dip: [10, 0, 0, 1],
+        }
+    }
+
+    // --- constants sanity ---
+
+    #[test]
+    fn payload_and_header_sizes_add_up_to_min_frame() {
+        assert_eq!(ETH_HDR_SIZE + ETH_PAY_MIN_SIZE, ETH_FRAME_MIN_SIZE);
+    }
+
+    #[test]
+    fn header_size_matches_two_macs_plus_ethertype() {
+        assert_eq!(ETH_HDR_SIZE, MAC_ADDR_LEN * 2 + 2);
+    }
+
+    // --- EthProt ---
+
+    #[test]
+    fn eth_prot_supports_ip_and_arp() {
+        assert!(EthProt::is_supported(libc::ETH_P_IP as u16));
+        assert!(EthProt::is_supported(libc::ETH_P_ARP as u16));
+    }
+
+    #[test]
+    fn eth_prot_rejects_ipv6() {
+        // Ipv6 is explicitly commented out of the enum, so it must be
+        // treated as unsupported even though it's a real EtherType.
+        assert!(!EthProt::is_supported(libc::ETH_P_IPV6 as u16));
+    }
+
+    #[test]
+    fn eth_prot_rejects_garbage_value() {
+        assert!(!EthProt::is_supported(0xFFFF));
+    }
+
+    // --- EthHdr ---
+
+    #[test]
+    fn eth_hdr_new_stores_macs_and_prot_type() {
+        let hdr = EthHdr::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), EthProt::Arp);
+        assert_eq!(hdr.dmac, DMAC);
+        assert_eq!(hdr.smac, SMAC);
+        assert_eq!(hdr.prot_type.get(), libc::ETH_P_ARP as u16);
+    }
+
+    #[test]
+    fn eth_hdr_display_shows_named_protocol() {
+        let hdr = EthHdr::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), EthProt::Ip);
+        let s = format!("{hdr}");
+        assert!(s.contains("IPV4"));
+    }
+
+    // --- Packet::<Eth>::parse validation ---
+
+    #[test]
+    fn parse_rejects_data_over_mtu() {
+        let data = vec![0u8; ETH_FRAME_MAX_SIZE + 1];
+        let result = Packet::<Eth>::parse(data);
+        assert!(matches!(result, Err(EthErr::ParseError(_))));
+    }
+
+    #[test]
+    fn parse_rejects_data_below_header_size() {
+        let data = vec![0u8; ETH_HDR_SIZE - 1];
+        let result = Packet::<Eth>::parse(data);
+        assert!(matches!(result, Err(EthErr::ParseError(_))));
+    }
+
+    #[test]
+    fn parse_rejects_unsupported_ethertype() {
+        // Hand-build a frame with a bogus EtherType so we bypass EthHdr::new
+        // (which only accepts a valid EthProt) and hit the runtime check
+        // inside Packet::<Eth>::parse.
+        let mut data = vec![0u8; ETH_FRAME_MIN_SIZE];
+        data[0..MAC_ADDR_LEN].copy_from_slice(&DMAC);
+        data[MAC_ADDR_LEN..MAC_ADDR_LEN * 2].copy_from_slice(&SMAC);
+        data[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2].copy_from_slice(&0xFFFFu16.to_be_bytes());
+
+        let result = Packet::<Eth>::parse(data);
+        assert!(matches!(result, Err(EthErr::InvalidProtError)));
+    }
+
+    #[test]
+    fn parse_accepts_valid_arp_frame() {
+        let data = valid_arp_eth_bytes();
+        let packet = Packet::<Eth>::parse(data).expect("valid arp frame should parse");
+        assert_eq!(packet.prot(), EthProt::Arp);
+    }
+
+    #[test]
+    fn parse_roundtrips_header_fields() {
+        let data = valid_arp_eth_bytes();
+        let packet = Packet::<Eth>::parse(data).expect("should parse");
+        let hdr = packet.hdr();
+        assert_eq!(hdr.dmac, Mac::BROADCAST.octets());
+        assert_eq!(hdr.smac, SMAC);
+    }
+
+    // --- accessors ---
+
+    #[test]
+    fn payload_starts_after_header() {
+        let data = valid_arp_eth_bytes();
+        let packet = Packet::<Eth>::parse(data.clone()).expect("should parse");
+        assert_eq!(packet.payload(), &data[ETH_HDR_SIZE..]);
+    }
+
+    #[test]
+    fn as_bytes_matches_original_data() {
+        let data = valid_arp_eth_bytes();
+        let packet = Packet::<Eth>::parse(data.clone()).expect("should parse");
+        assert_eq!(packet.as_bytes(), data.as_slice());
+    }
+
+    // --- construction ---
+
+    #[test]
+    fn new_writes_requested_macs_and_prot_into_header() {
+        let payload = EthPayload::Arp(Packet::<Arp>::new(dummy_arp_msg()));
+
+        let eth = Packet::<Eth>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), payload)
+            .expect("valid construction");
+
+        assert_eq!(eth.hdr().dmac, DMAC);
+        assert_eq!(eth.hdr().smac, SMAC);
+        assert_eq!(eth.prot(), EthProt::Arp);
+    }
+
+    #[test]
+    fn new_rejects_oversized_payload() {
+        // Bypass the normal Arp constructors (which always produce a
+        // small, MTU-safe frame) to exercise the size guard directly.
+        let oversized = EthPayload::Arp(Packet::<Arp>::from_vec(vec![0u8; ETH_FRAME_MAX_SIZE + 1]));
+
+        let result = Packet::<Eth>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), oversized);
+        assert!(matches!(result, Err(EthErr::ParseError(_))));
+    }
+
+    // --- into_parts ---
+
+    #[test]
+    fn into_parts_routes_arp_frames_to_arp_variant() {
+        let packet = Packet::<Eth>::parse(valid_arp_eth_bytes()).expect("should parse");
+        let (hdr, payload) = packet.into_parts().expect("should split");
+        assert_eq!(hdr.prot_type.get(), libc::ETH_P_ARP as u16);
+        assert!(matches!(payload, EthPayload::Arp(_)));
+    }
+}

@@ -156,10 +156,12 @@ async fn await_udev(socket: MonitorSocket, name: impl AsRef<OsStr>) -> Result<()
     // prep a closure to iterate over the events
     let get_events = |socket: &MonitorSocket| -> io::Result<()> {
         while let Some(event) = socket.iter().next() {
-            trace!(event_type = %event.event_type());
-            trace!(sys_name = %event.sysname().display());
-            trace!(sys_path = %event.syspath().display());
-            trace!(dev_type = ?event.devtype());
+            trace!(
+                event_type = %event.event_type(),
+                sys_name = %event.sysname().display(),
+                sys_path = %event.syspath().display(),
+                dev_type = ?event.devtype()
+            );
 
             if event.sysname() == name.as_ref() {
                 trace!("found device");

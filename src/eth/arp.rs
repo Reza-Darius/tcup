@@ -26,13 +26,13 @@ impl Packet<Arp> {
     }
 
     pub fn hdr(&self) -> ArpMsg {
-        ArpMsg::read_from_prefix(&self.data[ETH_HDR_SIZE..])
+        ArpMsg::read_from_prefix(&self.as_bytes()[ETH_HDR_SIZE..])
             .expect("the packet is validated already")
             .0
     }
 
     pub fn set_hdr(&mut self, hdr: ArpMsg) {
-        hdr.write_to_prefix(&mut self.data[ETH_HDR_SIZE..])
+        hdr.write_to_prefix(&mut self.as_bytes_mut()[ETH_HDR_SIZE..])
             .expect("the packet is validated already")
     }
 
@@ -196,7 +196,10 @@ impl Display for ArpMsg {
         let src_ip = Ipv4Addr::from_octets(self.sip);
         let dst_ip = Ipv4Addr::from_octets(self.dip);
 
-        write!(f, "hw type: {hw_type}, prot: {protocol}, opcode: {op}, src_mac: {src_mac}, src_ip: {src_ip}, dst_mac {dst_mac}, dst_ip {dst_ip}\n")
+        write!(
+            f,
+            "hw type: {hw_type}, prot: {protocol}, opcode: {op}, src_mac: {src_mac}, src_ip: {src_ip}, dst_mac {dst_mac}, dst_ip {dst_ip}\n"
+        )
     }
 }
 
@@ -220,3 +223,213 @@ impl Display for ArpMsg {
 //     }
 //     Ok(())
 // }
+
+// These tests only rely on the API surface visible in the pasted source:
+// Packet::<Arp>::new/parse/hdr/set_hdr, ArpMsg, Mac, and the ArpStore
+// trait. If your real Ipv4Addr extension trait or Packet::<Eth>::new
+// signature differs, adjust the helper below accordingly.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    const HOST_MAC: Mac = Mac::new(0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA);
+    const SENDER_MAC: Mac = Mac::new(0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB);
+
+    fn host_ip() -> Ipv4Addr {
+        Ipv4Addr::new(10, 0, 0, 1)
+    }
+
+    fn sender_ip() -> Ipv4Addr {
+        Ipv4Addr::new(10, 0, 0, 2)
+    }
+
+    fn other_ip() -> Ipv4Addr {
+        Ipv4Addr::new(10, 0, 0, 99)
+    }
+
+    fn base_request(target_ip: Ipv4Addr) -> ArpMsg {
+        ArpMsg {
+            hwtype: libc::ARPHRD_ETHER.into(),
+            prot_type: (libc::ETH_P_IP as u16).into(),
+            hwsize: MAC_ADDR_LEN as u8,
+            prosize: IP_ADDR_LEN as u8,
+            opcode: libc::ARPOP_REQUEST.into(),
+            smac: SENDER_MAC.octets(),
+            sip: sender_ip().octets(),
+            dmac: [0; MAC_ADDR_LEN],
+            dip: target_ip.octets(),
+        }
+    }
+
+    fn base_reply(target_ip: Ipv4Addr) -> ArpMsg {
+        let mut msg = base_request(target_ip);
+        msg.opcode = libc::ARPOP_REPLY.into();
+        msg.dmac = HOST_MAC.octets();
+        msg
+    }
+
+    /// Records calls so tests can assert on merge vs. insert behavior,
+    /// independent of what's actually stored.
+    #[derive(Default)]
+    struct MockStore {
+        known: Vec<(Mac, Ipv4Addr)>,
+        update_calls: RefCell<Vec<(Mac, Ipv4Addr)>>,
+        insert_calls: RefCell<Vec<(Mac, Ipv4Addr)>>,
+    }
+
+    impl MockStore {
+        fn with_known(mac: Mac, ip: Ipv4Addr) -> Self {
+            Self {
+                known: vec![(mac, ip)],
+                ..Default::default()
+            }
+        }
+    }
+
+    impl ArpStore for MockStore {
+        fn update_if_present(&mut self, smac: Mac, sip: Ipv4Addr) -> bool {
+            self.update_calls.borrow_mut().push((smac, sip));
+            self.known.iter().any(|(_, ip)| *ip == sip)
+        }
+
+        fn insert(&mut self, smac: Mac, sip: Ipv4Addr) {
+            self.insert_calls.borrow_mut().push((smac, sip));
+        }
+
+        fn addr(&self) -> (Mac, Ipv4Addr) {
+            (HOST_MAC, host_ip())
+        }
+    }
+
+    #[test]
+    fn request_directed_at_host_generates_reply() {
+        let packet = Packet::<Arp>::new(base_request(host_ip()));
+        let mut store = MockStore::default();
+
+        let reply_eth = packet
+            .run_arp_check(&mut store)
+            .expect("expected a reply packet");
+
+        let reply_arp =
+            Packet::<Arp>::parse(reply_eth).expect("reply should be a valid parseable ARP packet");
+        let hdr = reply_arp.hdr();
+
+        assert_eq!(hdr.opcode.get(), libc::ARPOP_REPLY);
+        assert_eq!(Mac::from_octets(hdr.smac).octets(), HOST_MAC.octets());
+        assert_eq!(Ipv4Addr::from_octets(hdr.sip), host_ip());
+        assert_eq!(Mac::from_octets(hdr.dmac).octets(), SENDER_MAC.octets());
+        assert_eq!(Ipv4Addr::from_octets(hdr.dip), sender_ip());
+    }
+
+    #[test]
+    fn request_not_directed_at_host_returns_none() {
+        let packet = Packet::<Arp>::new(base_request(other_ip()));
+        let mut store = MockStore::default();
+
+        let result = packet.run_arp_check(&mut store);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn reply_directed_at_host_updates_table_and_sends_nothing() {
+        let packet = Packet::<Arp>::new(base_reply(host_ip()));
+        let mut store = MockStore::default();
+
+        let result = packet.run_arp_check(&mut store);
+        assert!(result.is_none());
+        assert_eq!(store.insert_calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn unsupported_hwtype_is_ignored() {
+        let mut msg = base_request(host_ip());
+        msg.hwtype = 0xFFFF.into();
+        let packet = Packet::<Arp>::new(msg);
+        let mut store = MockStore::default();
+
+        assert!(packet.run_arp_check(&mut store).is_none());
+        assert!(store.update_calls.borrow().is_empty());
+        assert!(store.insert_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn unsupported_protocol_type_is_ignored() {
+        let mut msg = base_request(host_ip());
+        msg.prot_type = (libc::ETH_P_IPV6 as u16).into();
+        let packet = Packet::<Arp>::new(msg);
+        let mut store = MockStore::default();
+
+        assert!(packet.run_arp_check(&mut store).is_none());
+        assert!(store.update_calls.borrow().is_empty());
+        assert!(store.insert_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn existing_sender_is_updated_not_inserted() {
+        let packet = Packet::<Arp>::new(base_request(host_ip()));
+        let mut store = MockStore::with_known(SENDER_MAC, sender_ip());
+
+        let _ = packet.run_arp_check(&mut store);
+
+        assert_eq!(store.update_calls.borrow().len(), 1);
+        assert!(store.insert_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn new_sender_is_inserted_after_failed_update() {
+        let packet = Packet::<Arp>::new(base_request(host_ip()));
+        let mut store = MockStore::default();
+
+        let _ = packet.run_arp_check(&mut store);
+
+        assert_eq!(store.update_calls.borrow().len(), 1);
+        assert_eq!(store.insert_calls.borrow().len(), 1);
+        assert_eq!(store.insert_calls.borrow()[0], (SENDER_MAC, sender_ip()));
+    }
+
+    #[test]
+    fn new_arp_message_round_trips_through_parse() {
+        let original = base_request(host_ip());
+        let packet = Packet::<Arp>::new(original.clone());
+
+        // Wrap the raw ARP packet bytes in a minimal Eth frame's worth of
+        // padding so Packet::<Arp>::parse can strip ETH_HDR_SIZE back off.
+        // Packet::<Arp>::new already prepends ETH_HDR_SIZE zero bytes and
+        // pads to ETH_PAY_MIN_SIZE, so `hdr()` should recover the same
+        // fields we put in.
+        let hdr = packet.hdr();
+
+        assert_eq!(hdr.opcode.get(), original.opcode.get());
+        assert_eq!(hdr.smac, original.smac);
+        assert_eq!(hdr.sip, original.sip);
+        assert_eq!(hdr.dmac, original.dmac);
+        assert_eq!(hdr.dip, original.dip);
+    }
+
+    #[test]
+    fn new_request_builds_broadcast_ethernet_request() {
+        let smac = SENDER_MAC;
+        let sip = sender_ip();
+        let target = host_ip();
+
+        let eth = Packet::<Arp>::new_request(smac, sip, target);
+        let arp = Packet::<Arp>::parse(eth).expect("should parse back out");
+        let hdr = arp.hdr();
+
+        assert_eq!(hdr.opcode.get(), libc::ARPOP_REQUEST);
+        assert_eq!(Mac::from_octets(hdr.smac).octets(), smac.octets());
+        assert_eq!(Ipv4Addr::from_octets(hdr.sip), sip);
+        assert_eq!(Ipv4Addr::from_octets(hdr.dip), target);
+    }
+
+    #[test]
+    fn display_formats_known_fields() {
+        let hdr = base_request(host_ip());
+        let s = format!("{hdr}");
+        assert!(s.contains("Request"));
+        assert!(s.contains("IPV4"));
+        assert!(s.contains("ethernet"));
+    }
+}

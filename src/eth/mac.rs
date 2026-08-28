@@ -1,5 +1,5 @@
 use super::EthErr;
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Mac([u8; 6]);
 
 pub const MAC_ADDR_LEN: usize = libc::ETH_ALEN as usize;
@@ -7,7 +7,7 @@ pub const MAC_ADDR_LEN: usize = libc::ETH_ALEN as usize;
 impl Mac {
     pub const BROADCAST: Self = Mac([0xFFu8; MAC_ADDR_LEN]);
 
-    pub fn new(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8) -> Self {
+    pub const fn new(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8) -> Self {
         Mac([a, b, c, d, e, f])
     }
 
@@ -15,7 +15,7 @@ impl Mac {
         self.0
     }
 
-    pub fn from_octets(octets: [u8; 6]) -> Self {
+    pub const fn from_octets(octets: [u8; 6]) -> Self {
         Mac(octets)
     }
 }
@@ -42,7 +42,7 @@ impl std::str::FromStr for Mac {
             if count == 6 {
                 return Err(EthErr::Mac("invalid string for MAC conversion".into()));
             }
-            mac_parsed[0] = part.parse::<u8>().map_err(|e| EthErr::Mac(format!("parse error: {e}")))?;
+            mac_parsed[count] = part.parse::<u8>().map_err(|e| EthErr::Mac(format!("parse error: {e}")))?;
             count += 1;
         }
         if count != 6 {

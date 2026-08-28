@@ -4,6 +4,12 @@ use crate::error::Result;
 use crate::ip::IPPROTO_TCP;
 use crate::tcp::{TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_PSEUDOHDR_SIZE};
 
+const TCP_HDR_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
+const TCP_CHECK_OFFSET_FROM_HDR: usize = 16;
+pub const TCP_HDR_DOF_OFF: usize = 12;
+/// minimum offset
+const TCP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE + TCP_HDR_MINSIZE;
+
 impl Packet<Tcp> {
     pub fn new_tcp(
         eth_hdr: EthHdr,

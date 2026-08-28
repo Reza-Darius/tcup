@@ -1,14 +1,15 @@
 use std::net::Ipv4Addr;
 
-use tracing::{debug, error};
+use bytes::BufMut;
+use num_enum::TryFromPrimitive;
+use tracing::error;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
-use crate::eth::EthHdr;
+use crate::eth::Mac;
 use crate::utils::packet::*;
 use crate::{
     eth::ETH_HDR_SIZE,
-    ip::{error::IpErr, icmp::*},
-    tcp::{TCP_HDR_MINSIZE, handle_tcp},
+    ip::error::IpErr,
     utils::{calc_checksum_be, packet::Packet},
 };
 
@@ -21,145 +22,198 @@ pub const TTL_START: u8 = 64;
 
 pub const IPPROTO_ICMP: u8 = libc::IPPROTO_ICMP as u8;
 pub const IPPROTO_TCP: u8 = libc::IPPROTO_TCP as u8;
-pub const IPPROTO_UDP: u8 = libc::IPPROTO_UDP as u8;
 
 pub const IP_RF: u16 = 0x8000; // reserved
 pub const IP_DF: u16 = 0x4000; // don't fragment
 pub const IP_MF: u16 = 0x2000; // more fragments
 pub const FRAG_OFFSET_MASK: u16 = 0x1FFF;
 
+/// start of the IP header
 const IP_HDR_OFFSET: usize = ETH_HDR_SIZE;
+/// offset for checkmark byte
 const IP_CHECK_OFFSET: usize = ETH_HDR_SIZE + 10;
-/// minimum offset
+/// offset for protocol byte
+const IP_PROT_OFFSET: usize = ETH_HDR_SIZE + 10;
+/// payloard offset without options
 const IP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
 
-const TCP_HDR_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
-const TCP_CHECK_OFFSET_FROM_HDR: usize = 16;
-pub const TCP_HDR_DOF_OFF: usize = 12;
-/// minimum offset
-const TCP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE + TCP_HDR_MINSIZE;
+#[derive(TryFromPrimitive, PartialEq, Clone, Copy, Debug)]
+#[repr(u8)]
+pub enum Ipv4Prot {
+    Icmp = libc::IPPROTO_ICMP as u8,
+    Tcp = libc::IPPROTO_TCP as u8,
+}
 
 impl Packet<Ipv4> {
     pub fn parse(pck: Packet<Eth>) -> Result<Self, IpErr> {
+        let packet = pck.into_vec();
+        let eth_pay = &packet.as_bytes()[IP_HDR_OFFSET..];
+
+        if eth_pay.len() < IP_HDR_MINSIZE {
+            return Err(IpErr::ParseError(
+                "eth_pay is too small for IP header".into(),
+            ));
+        }
+
+        if get_hdr_ver(eth_pay[0]) != 4 {
+            return Err(IpErr::ParseError("not supported IP version".into()));
+        }
+
+        let hdr_size = get_hdr_len(eth_pay[0]);
+
+        if hdr_size > eth_pay.len() {
+            return Err(IpErr::ParseError(
+                "frame smaller than declared header length".into(),
+            ));
+        }
+
+        if hdr_size < IP_HDR_MINSIZE {
+            return Err(IpErr::ParseError("IP header below minimum 20 bytes".into()));
+        }
+
+        // options arent supported
+        if hdr_size > IP_HDR_MINSIZE {
+            return Err(IpErr::ParseError(
+                "IP header above supported 20 bytes".into(),
+            ));
+        }
+
+        let check = calc_checksum_be(&eth_pay[..hdr_size]);
+        if check != 0 {
+            return Err(IpErr::ParseError(
+                format!("invalid IP checksum: {check:x}").into(),
+            ));
+        }
+
+        let hdr = IPv4Hdr::read_from_prefix(&eth_pay)
+            .map_err(|e| IpErr::ParseError(format!("couldnt extract header: {e}")))?
+            .0;
+
+        if !hdr.is_fragmented() {
+            let hdr_frag = hdr.frag_off;
+            error!("{:b}", hdr_frag);
+            return Err(IpErr::ParseError("fragmentation is not supported".into()));
+        }
+
+        if (hdr.tot_len.get() as usize) < hdr_size {
+            return Err(IpErr::ParseError(
+                "total length smaller than header len".into(),
+            ));
+        };
+
+        if (hdr.tot_len.get() as usize) > eth_pay.len() {
+            return Err(IpErr::ParseError(
+                "total length exceeds eth_pay length".into(),
+            ));
+        }
+
+        Ok(Packet::from_vec(packet))
+    }
+
+    pub fn into_parts(self) -> Result<(IPv4Hdr, Ipv4Payload), IpErr> {
+        let hdr = self.hdr().clone();
+        todo!()
+        // match self.prot() {
+        //     Ipv4Prot::Icmp => Packet::<Icmp>::parse(),
+        //     Ipv4Prot::Tcp => todo!(),
+        // }
+    }
+
+    pub fn prot(&self) -> Ipv4Prot {
+        self.as_bytes()[IP_CHECK_OFFSET]
+            .try_into()
+            .expect("the packet is parsed")
+    }
+
+    pub fn to_eth(self, dmac: impl Into<Mac>, smac: impl Into<Mac>) -> Result<Packet<Eth>, IpErr> {
+        Packet::<Eth>::new(dmac, smac, self.into())
+            .map_err(|e| IpErr::ConversionError(format!("failed to create eth packet {e}")))
+    }
+
+    pub fn new(hdr: IPv4Hdr, payload: Ipv4Payload) -> Result<Packet<Ipv4>, IpErr> {
         todo!()
     }
 
-    pub fn into_parts(self) -> Result<(IP_hdr, Ipv4Payload), IpErr> {
-        todo!()
-    }
-
-    pub fn to_eth(hdr: EthHdr) -> Packet<Eth> {
-        todo!()
-    }
-
-    fn iphdr_size(&self) -> usize {
-        let res = ((self.data[ETH_HDR_SIZE] & 0x0F) << 2) as usize;
-        assert!((IP_HDR_MINSIZE..=IP_HDR_MAXSIZE).contains(&res));
+    /// reads the header length of the ip packet: 20 byte + options
+    #[inline(always)]
+    pub fn hdr_len(&self) -> usize {
+        // the len field is in the first byte
+        let res = get_hdr_len(self.as_bytes()[IP_HDR_OFFSET]);
+        debug_assert!(
+            (IP_HDR_MINSIZE..=IP_HDR_MAXSIZE).contains(&res),
+            "illegal size"
+        );
         res
     }
 
-    pub fn hdr(&self) -> IP_hdr {
-        IP_hdr::from_be_bytes(
-            self.data[IP_HDR_OFFSET..IP_HDR_OFFSET + IP_HDR_MINSIZE].try_into()?,
-        )
+    #[inline(always)]
+    pub fn hdr(&self) -> &IPv4Hdr {
+        IPv4Hdr::ref_from_prefix(&self.as_bytes()[IP_HDR_OFFSET..])
+            .expect("get ip hdr: the packet is parsed")
+            .0
     }
 
-    pub fn get_ip_hdr(&self) -> IP_hdr {
-        if self.data.len() < IP_HDR_OFFSET + IP_HDR_MINSIZE {
-            return Err("not enough data to retrieve IP header".into());
-        }
-
-        Ok(IP_hdr::from_be_bytes(
-            self.0[IP_HDR_OFFSET..IP_HDR_OFFSET + IP_HDR_MINSIZE].try_into()?,
-        ))
-    }
-
-    pub fn set_ip_hdr(&mut self, hdr: IP_hdr) -> Result<()> {
-        let lo = IP_HDR_OFFSET;
-        let hi = IP_HDR_OFFSET + IP_HDR_MINSIZE;
-
-        if self.0.len() < hi {
-            return Err("data too small to write IP hdr".into());
-        }
-
+    #[inline(always)]
+    fn set_hdr(&mut self, hdr: IPv4Hdr) {
         // currently doesnt support IP options
         assert_eq!(
             hdr.len(),
             IP_HDR_MINSIZE,
             "ip options arent supported currently"
         );
-
-        self.0.as_mut_slice()[lo..hi].copy_from_slice(&hdr.into_be_bytes());
-
-        Ok(())
+        hdr.write_to_prefix(&mut self.as_bytes_mut()[IP_HDR_OFFSET..])
+            .expect("set ip hdr: the packet is parsed");
     }
 
-    pub fn set_ip_check(&mut self) -> Result<()> {
-        if self.len() < IP_CHECK_OFFSET + 1 {
-            return Err("cant set ip checksum, len is too small".into());
-        }
+    #[inline(always)]
+    fn set_ip_check(&mut self) {
+        debug_assert!(self.len() < IP_CHECK_OFFSET + 1);
 
         let offset = IP_CHECK_OFFSET;
 
         // setting to 0 before calculation
-        self.0[offset] = 0;
-        self.0[offset + 1] = 0;
+        self.as_bytes_mut()[offset] = 0;
+        self.as_bytes_mut()[offset + 1] = 0;
 
-        let check = calc_checksum_be(&self.0[ETH_HDR_SIZE..ETH_HDR_SIZE + self.iphdr_size()]);
-        self.0[offset..offset + size_of::<u16>()].copy_from_slice(&u16::to_be_bytes(check));
+        let check = calc_checksum_be(&self.as_bytes()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len()]);
+        (&mut self.as_bytes_mut()[offset..]).put_u16(check);
+        // self.data[offset..offset + size_of::<u16>()].copy_from_slice(&u16::to_be_bytes(check));
 
-        assert_eq!(
+        debug_assert_eq!(
             0,
-            calc_checksum_be(&self.0[ETH_HDR_SIZE..ETH_HDR_SIZE + self.iphdr_size()]),
+            calc_checksum_be(&self.as_bytes()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len()]),
             "checksum failed"
         );
-
-        Ok(())
     }
+}
 
-    pub fn get_ip_pay(&self) -> Result<&[u8]> {
-        let offset = ETH_HDR_SIZE + self.iphdr_size();
+#[derive(Debug)]
+pub enum Ipv4Payload {
+    Tcp(Packet<Tcp>),
+    Icmp(Packet<Icmp>),
+}
 
-        if self.len() < offset {
-            return Err("no IP payload found".into());
-        }
-
-        Ok(&self.0.as_slice()[offset..])
+impl From<Packet<Tcp>> for Ipv4Payload {
+    fn from(value: Packet<Tcp>) -> Self {
+        Ipv4Payload::Tcp(value)
     }
+}
 
-    pub fn get_ip_pay_mut(&mut self) -> Result<&mut [u8]> {
-        let offset = ETH_HDR_SIZE + self.iphdr_size();
-        if self.len() < offset {
-            return Err("no IP payload found".into());
-        }
-
-        Ok(&mut self.0.as_mut_slice()[offset..])
-    }
-
-    /// overwrites the IP payload of the frame with data
-    pub fn set_ip_pay(&mut self, data: &[u8]) -> Result<()> {
-        let offset = ETH_HDR_SIZE + self.iphdr_size();
-
-        if offset + data.len() > ETH_FRAME_MAX_SIZE {
-            return Err("data exceeds MTU".into());
-        }
-
-        self.0.truncate(offset);
-        self.0.extend_from_slice(data);
-
-        Ok(())
+impl From<Packet<Icmp>> for Ipv4Payload {
+    fn from(value: Packet<Icmp>) -> Self {
+        Ipv4Payload::Icmp(value)
     }
 }
 
 #[derive(Default, Debug, Clone, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C, packed)]
-pub struct IP_hdr {
-    pub ver_ihl: u8,  // 4 bits for version and IHL (internet header length)
-    pub tos: u8,      // type of service
+pub struct IPv4Hdr {
+    pub ver_ihl: u8,      // 4 bits for version and IHL (internet header length)
+    pub tos: u8,          // type of service
     pub tot_len: U16<BE>, // length of the whole IP datagram
     pub id: U16<BE>,
     pub frag_off: U16<BE>, // first 3 bits are flags, rest offset
-    pub ttl: u8,       // time to live
+    pub ttl: u8,           // time to live
     pub prot: u8,
     pub checksum: U16<BE>, // only covers the IP header
 
@@ -167,18 +221,20 @@ pub struct IP_hdr {
     pub dest_addr: [u8; 4],
 }
 
-impl IP_hdr {
+impl IPv4Hdr {
     /// sets the header size, takes the length in bytes as argument
-    pub fn set_ihl(&mut self, len: usize) -> Result<()> {
+    pub fn set_ihl(&mut self, len: usize) -> Result<(), IpErr> {
         if len > IP_HDR_MAXSIZE {
-            return Err("length exceeding 4 bit capacity".into());
+            return Err(IpErr::HeaderError("length exceeding 4 bit capacity".into()));
         }
         if len < IP_HDR_MINSIZE {
-            return Err("length cant be smaller than 20 bytes".into());
+            return Err(IpErr::HeaderError(
+                "length cant be smaller than 20 bytes".into(),
+            ));
         }
 
         if len != IP_HDR_MINSIZE {
-            return Err("IP options arent supported".into());
+            return Err(IpErr::HeaderError("IP options arent supported".into()));
         }
 
         // set version to 4 with len
@@ -202,17 +258,19 @@ impl IP_hdr {
     }
 }
 
-/// retrieves the size of the IP header in bytes
-pub fn get_hdr_len(byte: u8) -> usize {
-    ((byte & 0x0F) << 2) as usize
+/// retrieves the header len of the first byte of an ipv4 header
+#[inline(always)]
+fn get_hdr_len(tot_len: u8) -> usize {
+    ((tot_len & 0x0F) << 2) as usize
 }
 
 /// retrieves the version declared in the first header byte
+#[inline(always)]
 fn get_hdr_ver(byte: u8) -> u8 {
     byte >> 4
 }
 
-impl std::fmt::Display for IP_hdr {
+impl std::fmt::Display for IPv4Hdr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let ver = self.version();
         let len = self.len();
@@ -251,60 +309,13 @@ impl std::fmt::Display for IP_hdr {
 //     }
 // }
 
-fn check_ip_packet(eth_pay: &[u8]) -> Result<IP_hdr> {
-    if eth_pay.len() < IP_HDR_MINSIZE {
-        return Err("eth_pay is too small for IP header".into());
-    }
-
-    if get_hdr_ver(eth_pay[0]) != 4 {
-        return Err("not supported IP version".into());
-    }
-
-    let hdr_size = get_hdr_len(eth_pay[0]);
-
-    if hdr_size > eth_pay.len() {
-        return Err("frame smaller than declared header length".into());
-    }
-
-    if hdr_size < IP_HDR_MINSIZE {
-        return Err("IP header below minimum 20 bytes".into());
-    }
-
-    // options arent supported
-    if hdr_size > IP_HDR_MINSIZE {
-        return Err("IP header above supported 20 bytes".into());
-    }
-
-    let check = calc_checksum_be(&eth_pay[..hdr_size]);
-    if check != 0 {
-        return Err(format!("invalid IP checksum: {check:x}").into());
-    }
-
-    let hdr = IP_hdr::from_be_bytes(&eth_pay[..IP_HDR_MINSIZE].try_into()?);
-
-    if !hdr.is_fragmented() {
-        let hdr_frag = hdr.frag_off;
-        error!("{:b}", hdr_frag);
-        return Err("fragmentation is not supported".into());
-    }
-
-    if (hdr.tot_len as usize) < hdr_size {
-        return Err("total length smaller than header len".into());
-    };
-
-    if (hdr.tot_len as usize) > eth_pay.len() {
-        return Err("total length exceeds eth_pay length".into());
-    }
-    Ok(hdr)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn hdr_set_len() -> Result<()> {
-        let mut hdr = IP_hdr::default();
+    fn hdr_set_len() {
+        let mut hdr = IPv4Hdr::default();
 
         assert!(hdr.set_ihl(20).is_ok());
         assert_eq!(hdr.ver_ihl & 0x0F, 5);
@@ -319,7 +330,5 @@ mod tests {
         assert!(hdr.set_ihl(1).is_err());
         assert!(hdr.set_ihl(4).is_err());
         assert!(hdr.set_ihl(u32::MAX as usize).is_err());
-
-        Ok(())
     }
 }
