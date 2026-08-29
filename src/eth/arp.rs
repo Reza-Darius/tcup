@@ -26,13 +26,13 @@ impl Packet<Arp> {
     }
 
     pub fn hdr(&self) -> ArpMsg {
-        ArpMsg::read_from_prefix(&self.as_bytes()[ETH_HDR_SIZE..])
+        ArpMsg::read_from_prefix(&self.as_slice()[ETH_HDR_SIZE..])
             .expect("the packet is validated already")
             .0
     }
 
     pub fn set_hdr(&mut self, hdr: ArpMsg) {
-        hdr.write_to_prefix(&mut self.as_bytes_mut()[ETH_HDR_SIZE..])
+        hdr.write_to_prefix(&mut self.as_slice_mut()[ETH_HDR_SIZE..])
             .expect("the packet is validated already")
     }
 
@@ -42,10 +42,11 @@ impl Packet<Arp> {
         // we include padding to get to the required minimum ethernet size
         const SIZE: usize = ETH_HDR_SIZE + ARP_PACKET_SIZE + PADDING;
 
-        let mut v = vec![0u8; SIZE];
+        let mut v = Vec::with_capacity(SIZE);
 
         v.put_slice(&[0; ETH_HDR_SIZE]);
         v.put_slice(packet.as_bytes());
+        v.resize(SIZE, 0);
 
         v.into()
     }
@@ -196,9 +197,9 @@ impl Display for ArpMsg {
         let src_ip = Ipv4Addr::from_octets(self.sip);
         let dst_ip = Ipv4Addr::from_octets(self.dip);
 
-        write!(
+        writeln!(
             f,
-            "hw type: {hw_type}, prot: {protocol}, opcode: {op}, src_mac: {src_mac}, src_ip: {src_ip}, dst_mac {dst_mac}, dst_ip {dst_ip}\n"
+            "hw type: {hw_type}, prot: {protocol}, opcode: {op}, src_mac: {src_mac}, src_ip: {src_ip}, dst_mac {dst_mac}, dst_ip {dst_ip}"
         )
     }
 }
@@ -224,30 +225,18 @@ impl Display for ArpMsg {
 //     Ok(())
 // }
 
-// These tests only rely on the API surface visible in the pasted source:
-// Packet::<Arp>::new/parse/hdr/set_hdr, ArpMsg, Mac, and the ArpStore
-// trait. If your real Ipv4Addr extension trait or Packet::<Eth>::new
-// signature differs, adjust the helper below accordingly.
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::RefCell;
 
     const HOST_MAC: Mac = Mac::new(0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA);
+    const HOST_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+
     const SENDER_MAC: Mac = Mac::new(0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB);
+    const SENDER_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
 
-    fn host_ip() -> Ipv4Addr {
-        Ipv4Addr::new(10, 0, 0, 1)
-    }
-
-    fn sender_ip() -> Ipv4Addr {
-        Ipv4Addr::new(10, 0, 0, 2)
-    }
-
-    fn other_ip() -> Ipv4Addr {
-        Ipv4Addr::new(10, 0, 0, 99)
-    }
+    const OTHER_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 99);
 
     fn base_request(target_ip: Ipv4Addr) -> ArpMsg {
         ArpMsg {
@@ -257,7 +246,7 @@ mod tests {
             prosize: IP_ADDR_LEN as u8,
             opcode: libc::ARPOP_REQUEST.into(),
             smac: SENDER_MAC.octets(),
-            sip: sender_ip().octets(),
+            sip: SENDER_IP.octets(),
             dmac: [0; MAC_ADDR_LEN],
             dip: target_ip.octets(),
         }
@@ -269,6 +258,8 @@ mod tests {
         msg.dmac = HOST_MAC.octets();
         msg
     }
+
+    // UNREAL SLOP INCOMING IM SO SORRY
 
     /// Records calls so tests can assert on merge vs. insert behavior,
     /// independent of what's actually stored.
@@ -299,13 +290,13 @@ mod tests {
         }
 
         fn addr(&self) -> (Mac, Ipv4Addr) {
-            (HOST_MAC, host_ip())
+            (HOST_MAC, HOST_IP)
         }
     }
 
     #[test]
     fn request_directed_at_host_generates_reply() {
-        let packet = Packet::<Arp>::new(base_request(host_ip()));
+        let packet = Packet::<Arp>::new(base_request(HOST_IP));
         let mut store = MockStore::default();
 
         let reply_eth = packet
@@ -318,14 +309,14 @@ mod tests {
 
         assert_eq!(hdr.opcode.get(), libc::ARPOP_REPLY);
         assert_eq!(Mac::from_octets(hdr.smac).octets(), HOST_MAC.octets());
-        assert_eq!(Ipv4Addr::from_octets(hdr.sip), host_ip());
+        assert_eq!(Ipv4Addr::from_octets(hdr.sip), HOST_IP);
         assert_eq!(Mac::from_octets(hdr.dmac).octets(), SENDER_MAC.octets());
-        assert_eq!(Ipv4Addr::from_octets(hdr.dip), sender_ip());
+        assert_eq!(Ipv4Addr::from_octets(hdr.dip), SENDER_IP);
     }
 
     #[test]
     fn request_not_directed_at_host_returns_none() {
-        let packet = Packet::<Arp>::new(base_request(other_ip()));
+        let packet = Packet::<Arp>::new(base_request(OTHER_IP));
         let mut store = MockStore::default();
 
         let result = packet.run_arp_check(&mut store);
@@ -334,7 +325,7 @@ mod tests {
 
     #[test]
     fn reply_directed_at_host_updates_table_and_sends_nothing() {
-        let packet = Packet::<Arp>::new(base_reply(host_ip()));
+        let packet = Packet::<Arp>::new(base_reply(HOST_IP));
         let mut store = MockStore::default();
 
         let result = packet.run_arp_check(&mut store);
@@ -344,7 +335,7 @@ mod tests {
 
     #[test]
     fn unsupported_hwtype_is_ignored() {
-        let mut msg = base_request(host_ip());
+        let mut msg = base_request(HOST_IP);
         msg.hwtype = 0xFFFF.into();
         let packet = Packet::<Arp>::new(msg);
         let mut store = MockStore::default();
@@ -356,7 +347,7 @@ mod tests {
 
     #[test]
     fn unsupported_protocol_type_is_ignored() {
-        let mut msg = base_request(host_ip());
+        let mut msg = base_request(HOST_IP);
         msg.prot_type = (libc::ETH_P_IPV6 as u16).into();
         let packet = Packet::<Arp>::new(msg);
         let mut store = MockStore::default();
@@ -366,10 +357,10 @@ mod tests {
         assert!(store.insert_calls.borrow().is_empty());
     }
 
-    #[test]
+    #[test_log::test]
     fn existing_sender_is_updated_not_inserted() {
-        let packet = Packet::<Arp>::new(base_request(host_ip()));
-        let mut store = MockStore::with_known(SENDER_MAC, sender_ip());
+        let packet = Packet::<Arp>::new(base_request(HOST_IP));
+        let mut store = MockStore::with_known(SENDER_MAC, SENDER_IP);
 
         let _ = packet.run_arp_check(&mut store);
 
@@ -379,19 +370,19 @@ mod tests {
 
     #[test]
     fn new_sender_is_inserted_after_failed_update() {
-        let packet = Packet::<Arp>::new(base_request(host_ip()));
+        let packet = Packet::<Arp>::new(base_request(HOST_IP));
         let mut store = MockStore::default();
 
         let _ = packet.run_arp_check(&mut store);
 
         assert_eq!(store.update_calls.borrow().len(), 1);
         assert_eq!(store.insert_calls.borrow().len(), 1);
-        assert_eq!(store.insert_calls.borrow()[0], (SENDER_MAC, sender_ip()));
+        assert_eq!(store.insert_calls.borrow()[0], (SENDER_MAC, SENDER_IP));
     }
 
     #[test]
     fn new_arp_message_round_trips_through_parse() {
-        let original = base_request(host_ip());
+        let original = base_request(HOST_IP);
         let packet = Packet::<Arp>::new(original.clone());
 
         // Wrap the raw ARP packet bytes in a minimal Eth frame's worth of
@@ -411,8 +402,8 @@ mod tests {
     #[test]
     fn new_request_builds_broadcast_ethernet_request() {
         let smac = SENDER_MAC;
-        let sip = sender_ip();
-        let target = host_ip();
+        let sip = SENDER_IP;
+        let target = HOST_IP;
 
         let eth = Packet::<Arp>::new_request(smac, sip, target);
         let arp = Packet::<Arp>::parse(eth).expect("should parse back out");
@@ -426,7 +417,7 @@ mod tests {
 
     #[test]
     fn display_formats_known_fields() {
-        let hdr = base_request(host_ip());
+        let hdr = base_request(HOST_IP);
         let s = format!("{hdr}");
         assert!(s.contains("Request"));
         assert!(s.contains("IPV4"));

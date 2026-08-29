@@ -13,17 +13,13 @@ pub struct Packet<P: PacketType> {
 }
 
 impl<P: PacketType> NetworkPacket for Packet<P> {
-    fn len(&self) -> usize {
-        self.data.len()
-    }
-
     /// a slice to the entire packet buffer
-    fn as_bytes(&self) -> &[u8] {
+    fn as_slice(&self) -> &[u8] {
         &self.data
     }
 
     /// a slice to the entire packet buffer
-    fn as_bytes_mut(&mut self) -> &mut [u8] {
+    fn as_slice_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
 
@@ -52,11 +48,17 @@ impl<P: PacketType> AsRef<[u8]> for Packet<P> {
 
 /// trait for a packet that can be sent on the network
 pub trait NetworkPacket {
-    fn len(&self) -> usize;
-    fn as_bytes(&self) -> &[u8];
-    fn as_bytes_mut(&mut self) -> &mut [u8];
+    fn as_slice(&self) -> &[u8];
+    fn as_slice_mut(&mut self) -> &mut [u8];
     fn into_vec(self) -> Vec<u8>;
     fn from_vec(data: Vec<u8>) -> Self;
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// marker trait for supported protocols

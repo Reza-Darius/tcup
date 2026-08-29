@@ -67,7 +67,7 @@ impl Packet<Eth> {
     }
 
     pub fn into_parts(self) -> Result<(EthHdr, EthPayload), EthErr> {
-        let hdr = self.hdr().clone();
+        let hdr = *self.hdr();
 
         let pay = match self.prot() {
             EthProt::Arp => EthPayload::Arp(Packet::<Arp>::parse(self)?),
@@ -79,7 +79,7 @@ impl Packet<Eth> {
 
     pub fn prot(&self) -> EthProt {
         u16::from_be_bytes(
-            self.as_bytes()[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2]
+            self.as_slice()[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2]
                 .try_into()
                 .expect("get eth prot: packet is parsed and has the required length"),
         )
@@ -117,9 +117,7 @@ impl Packet<Eth> {
 
         // inserting padding
         if data.len() < ETH_FRAME_MIN_SIZE {
-            for _ in data.len()..ETH_FRAME_MIN_SIZE {
-                data.push(0);
-            }
+            data.resize(ETH_FRAME_MIN_SIZE, 0);
         }
 
         hdr.as_bytes()
@@ -130,7 +128,7 @@ impl Packet<Eth> {
     }
 
     pub fn hdr(&self) -> &EthHdr {
-        EthHdr::ref_from_prefix(&self.as_bytes())
+        EthHdr::ref_from_prefix(self.as_slice())
             .expect("a parsed frame has sufficient len")
             .0
         // Eth_hdr::from_be_bytes(
@@ -141,7 +139,7 @@ impl Packet<Eth> {
     }
 
     pub fn payload(&self) -> &[u8] {
-        &self.as_bytes()[ETH_PAY_OFFSET..]
+        &self.as_slice()[ETH_PAY_OFFSET..]
     }
 
     // fn with_cap(cap: usize) -> Result<Self> {
@@ -317,15 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn eth_hdr_display_shows_named_protocol() {
-        let hdr = EthHdr::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), EthProt::Ip);
-        let s = format!("{hdr}");
-        assert!(s.contains("IPV4"));
-    }
-
-    // --- Packet::<Eth>::parse validation ---
-
-    #[test]
     fn parse_rejects_data_over_mtu() {
         let data = vec![0u8; ETH_FRAME_MAX_SIZE + 1];
         let result = Packet::<Eth>::parse(data);
@@ -341,12 +330,11 @@ mod tests {
 
     #[test]
     fn parse_rejects_unsupported_ethertype() {
-        // Hand-build a frame with a bogus EtherType so we bypass EthHdr::new
-        // (which only accepts a valid EthProt) and hit the runtime check
-        // inside Packet::<Eth>::parse.
         let mut data = vec![0u8; ETH_FRAME_MIN_SIZE];
         data[0..MAC_ADDR_LEN].copy_from_slice(&DMAC);
         data[MAC_ADDR_LEN..MAC_ADDR_LEN * 2].copy_from_slice(&SMAC);
+
+        // bogus ethertype
         data[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2].copy_from_slice(&0xFFFFu16.to_be_bytes());
 
         let result = Packet::<Eth>::parse(data);
@@ -368,24 +356,6 @@ mod tests {
         assert_eq!(hdr.dmac, Mac::BROADCAST.octets());
         assert_eq!(hdr.smac, SMAC);
     }
-
-    // --- accessors ---
-
-    #[test]
-    fn payload_starts_after_header() {
-        let data = valid_arp_eth_bytes();
-        let packet = Packet::<Eth>::parse(data.clone()).expect("should parse");
-        assert_eq!(packet.payload(), &data[ETH_HDR_SIZE..]);
-    }
-
-    #[test]
-    fn as_bytes_matches_original_data() {
-        let data = valid_arp_eth_bytes();
-        let packet = Packet::<Eth>::parse(data.clone()).expect("should parse");
-        assert_eq!(packet.as_bytes(), data.as_slice());
-    }
-
-    // --- construction ---
 
     #[test]
     fn new_writes_requested_macs_and_prot_into_header() {

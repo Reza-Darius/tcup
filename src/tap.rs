@@ -339,7 +339,7 @@ pub enum TapError {
 
 #[cfg(test)]
 mod test {
-    use std::net::Ipv4Addr;
+    use std::{net::Ipv4Addr, time::Duration};
 
     use futures::StreamExt;
     use rtnetlink::packet_route::{address::AddressAttribute, link::LinkAttribute};
@@ -393,5 +393,10 @@ mod test {
                 false
             }
         }));
+
+        // uncomment these lines to check with "ip a" to confirm
+
+        // eprintln!("initiaized tap device on: {name}, {addr}/{subnet}, {}", tap.mac);
+        // tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }

@@ -141,7 +141,7 @@ impl Packet<Ipv4> {
     }
 
     pub fn prot(&self) -> Ipv4Prot {
-        self.as_bytes()[IP_CHECK_OFFSET]
+        self.as_slice()[IP_CHECK_OFFSET]
             .try_into()
             .expect("the packet is parsed")
     }
@@ -155,7 +155,7 @@ impl Packet<Ipv4> {
     #[inline(always)]
     pub fn hdr_len(&self) -> usize {
         // the len field is in the first byte
-        let res = get_hdr_len(self.as_bytes()[IP_HDR_OFFSET]);
+        let res = get_hdr_len(self.as_slice()[IP_HDR_OFFSET]);
         debug_assert!(
             (IP_HDR_MINSIZE..=IP_HDR_MAXSIZE).contains(&res),
             "illegal size"
@@ -165,7 +165,7 @@ impl Packet<Ipv4> {
 
     #[inline(always)]
     pub fn hdr(&self) -> &IPv4Hdr {
-        IPv4Hdr::ref_from_prefix(&self.as_bytes()[IP_HDR_OFFSET..])
+        IPv4Hdr::ref_from_prefix(&self.as_slice()[IP_HDR_OFFSET..])
             .expect("get ip hdr: the packet is parsed")
             .0
     }
@@ -178,7 +178,7 @@ impl Packet<Ipv4> {
             IP_HDR_MINSIZE,
             "ip options arent supported currently"
         );
-        hdr.write_to_prefix(&mut self.as_bytes_mut()[IP_HDR_OFFSET..])
+        hdr.write_to_prefix(&mut self.as_slice_mut()[IP_HDR_OFFSET..])
             .expect("set ip hdr: the packet is parsed");
     }
 
@@ -189,16 +189,16 @@ impl Packet<Ipv4> {
         let offset = IP_CHECK_OFFSET;
 
         // setting to 0 before calculation
-        self.as_bytes_mut()[offset] = 0;
-        self.as_bytes_mut()[offset + 1] = 0;
+        self.as_slice_mut()[offset] = 0;
+        self.as_slice_mut()[offset + 1] = 0;
 
-        let check = calc_checksum_be(&self.as_bytes()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len()]);
-        (&mut self.as_bytes_mut()[offset..]).put_u16(check);
+        let check = calc_checksum_be(&self.as_slice()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len()]);
+        (&mut self.as_slice_mut()[offset..]).put_u16(check);
         // self.data[offset..offset + size_of::<u16>()].copy_from_slice(&u16::to_be_bytes(check));
 
         debug_assert_eq!(
             0,
-            calc_checksum_be(&self.as_bytes()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len()]),
+            calc_checksum_be(&self.as_slice()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len()]),
             "checksum failed"
         );
     }
