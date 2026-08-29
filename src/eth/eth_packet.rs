@@ -2,6 +2,7 @@ use num_enum::TryFromPrimitive;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
 use super::mac::*;
+use crate::eth::EthErr::{BuildError, InvalidProtError, ParseError};
 use crate::eth::error::EthErr;
 use crate::utils::packet::*;
 
@@ -44,13 +45,13 @@ impl Packet<Eth> {
         let data = data.into();
 
         if data.len() > ETH_FRAME_MAX_SIZE {
-            return Err(EthErr::ParseError("data exceeds MTU size"));
+            return Err(ParseError("data exceeds MTU size"));
         }
 
         // TODO: do we need more validaton?
 
         if data.len() < ETH_HDR_SIZE {
-            return Err(EthErr::ParseError("data below minimumt hdr size"));
+            return Err(ParseError("data below minimumt hdr size"));
         }
 
         let hdr = EthHdr::read_from_prefix(&data)
@@ -61,7 +62,7 @@ impl Packet<Eth> {
             .prot_type
             .get()
             .try_into()
-            .map_err(|_| EthErr::InvalidProtError)?;
+            .map_err(|_| InvalidProtError)?;
 
         Ok(Packet::from_vec(data))
     }
@@ -108,11 +109,11 @@ impl Packet<Eth> {
         let hdr = EthHdr::new(dmac, smac, prot);
 
         if data.len() < ETH_HDR_SIZE {
-            return Err(EthErr::ParseError("payload size doesnt add up"));
+            return Err(BuildError("payload size doesnt add up"));
         }
 
         if data.len() > ETH_FRAME_MAX_SIZE {
-            return Err(EthErr::ParseError("payload is too large"));
+            return Err(BuildError("payload is too large"));
         }
 
         // inserting padding

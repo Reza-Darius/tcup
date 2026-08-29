@@ -7,6 +7,8 @@ pub enum EthErr {
     #[error("{0}")]
     ParseError(&'static str),
     #[error("{0}")]
+    BuildError(&'static str),
+    #[error("{0}")]
     MacError(String),
     #[error("{0}")]
     IpError(#[from] IpErr),
