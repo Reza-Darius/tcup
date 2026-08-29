@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use crate::eth::EthFrame;
+use crate::eth::EthPacket;
 
 use bincode::{Decode, Encode};
 use tokio::sync::mpsc::Sender;
@@ -28,7 +28,7 @@ pub enum Call {
 pub enum SocketWorkerMsg {
     Close,
     Send,
-    Frame(EthFrame),
+    Frame(EthPacket),
 }
 
 #[derive(Debug, Encode, Decode)]

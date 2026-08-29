@@ -4,14 +4,15 @@ use std::time::Duration;
 use std::{collections::HashMap, net::Ipv4Addr};
 
 use crate::Error;
-use crate::arp::arp_broadcast;
 use crate::error::Result;
-use crate::eth::{ETH_FRAME_MAX_SIZE, EthFrame, handle_frame};
+use crate::eth::arp_broadcast;
+use crate::eth::{ETH_FRAME_MAX_SIZE, EthPacket, handle_frame};
 use crate::tap::TAPDevice;
 use crate::tcp::sock::Socket;
 use crate::tcp::timer::start_clock;
-use crate::types::{Mac, TCPCon};
-use crate::utils::{cidr_to_mask, get_default_gateway, setup_cap};
+use crate::types::TCPCon;
+use crate::utils::Mac;
+use crate::utils::cidr_to_mask;
 use parking_lot::{Mutex, RwLock};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
@@ -40,8 +41,6 @@ struct TCupInner {
 
 impl TCup {
     pub fn init(name: &str, addr: &str) -> Result<Self> {
-        setup_cap()?;
-
         // let tap = TAPDevice::new(name)?;
         // tap.set_if_link()?;
         // tap.set_if_addr(addr)?;
@@ -132,7 +131,7 @@ impl TCup {
     }
 
     /// writes to the TAP device
-    pub async fn write_tap(&self, frame: EthFrame) -> Result<usize> {
+    pub async fn write_tap(&self, frame: EthPacket) -> Result<usize> {
         // self.inner.tap.write(frame.as_bytes()).await.map_err(Into::into)
         todo!()
     }
@@ -227,7 +226,7 @@ async fn handle_tap(tcup: TCup, mut buf: impl AsMut<[u8]>) {
     let buf = buf.as_mut();
     let n = buf.len();
 
-    let frame = match EthFrame::from_be_bytes(&buf[..n]) {
+    let frame = match EthPacket::from_be_bytes(&buf[..n]) {
         Ok(f) => f,
         Err(e) => {
             error!(%e, "failed to create frame");

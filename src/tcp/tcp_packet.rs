@@ -4,6 +4,214 @@ use crate::error::Result;
 use crate::ip::IPPROTO_TCP;
 use crate::tcp::{TCP_HDR_MAXSIZE, TCP_HDR_MINSIZE, TCP_PSEUDOHDR_SIZE};
 
+const TCP_HDR_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
+const TCP_CHECK_OFFSET_FROM_HDR: usize = 16;
+pub const TCP_HDR_DOF_OFF: usize = 12;
+/// minimum offset
+const TCP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE + TCP_HDR_MINSIZE;
+
+impl Packet<Tcp> {
+    pub fn new_tcp(
+        eth_hdr: EthHdr,
+        ip_hdr: IP_hdr,
+        tcp_hdr: TCP_hdr,
+        tcp_opts: TCP_opts,
+        tcp_pay: &[u8],
+    ) -> Result<Self> {
+        let mut packet = EthPacket::with_cap(ETH_HDR_SIZE + ip_hdr.tot_len as usize)?;
+
+        packet.set_eth_hdr(&eth_hdr);
+        packet.set_ip_hdr(ip_hdr)?;
+        packet.set_tcp_hdr(tcp_hdr)?;
+        packet.set_tcp_opts(tcp_opts)?;
+        packet.set_tcp_pay(tcp_pay)?;
+        packet.set_tcp_check(PseudoHdr::new(
+            ip_hdr.src_addr,
+            ip_hdr.dest_addr,
+            tcp_hdr.len() + tcp_pay.len(),
+        ))?;
+        packet.set_ip_check()?;
+
+        if packet.data.len() != ETH_HDR_SIZE + ip_hdr.len() + tcp_hdr.len() {
+            return Err("error when assembling frame: lengths dont match".into());
+        }
+
+        Ok(packet)
+    }
+
+    fn tcphdr_size(&self) -> usize {
+        let offset = ETH_HDR_SIZE + self.iphdr_size() + TCP_HDR_DOF_OFF;
+        let res = (((self.0[offset] >> 4) & 0xF) << 2) as usize;
+        assert!((TCP_HDR_MINSIZE..=TCP_HDR_MAXSIZE).contains(&res));
+        res
+    }
+
+    pub fn get_tcp_hdr(&self) -> Result<TCP_hdr> {
+        let lo = ETH_HDR_SIZE + self.iphdr_size();
+        let hi = lo + TCP_HDR_MINSIZE;
+
+        if self.0.len() < hi {
+            return Err("not enough data to retrieve TCP header".into());
+        }
+
+        Ok(TCP_hdr::from_be_bytes(self.0[lo..hi].try_into()?))
+    }
+
+    pub fn set_tcp_hdr(&mut self, hdr: TCP_hdr) -> Result<()> {
+        if !(TCP_HDR_MINSIZE..=TCP_HDR_MAXSIZE).contains(&hdr.len()) {
+            return Err("invalid TCP hdr size".into());
+        }
+
+        let lo = ETH_HDR_SIZE + self.iphdr_size();
+        let hi = lo + TCP_HDR_MINSIZE;
+
+        if self.0.len() < hi {
+            return Err("frame data too small to write TCP header".into());
+        }
+
+        self.0.as_mut_slice()[lo..hi].copy_from_slice(&hdr.into_be_bytes());
+
+        assert_eq!(hdr.len(), self.tcphdr_size());
+        Ok(())
+    }
+
+    pub fn get_tcp_opts(&self) -> Result<TCP_opts> {
+        let lo = ETH_HDR_SIZE + self.iphdr_size() + TCP_HDR_MINSIZE;
+        let hi = lo + self.tcphdr_size() - TCP_HDR_MINSIZE;
+
+        if self.0.len() < hi {
+            return Err("frame data too small to retrieve TCP opts".into());
+        }
+
+        TCP_opts::from_be_bytes(&self.0[lo..hi])
+    }
+
+    pub fn set_tcp_opts(&mut self, opts: TCP_opts) -> Result<()> {
+        let opts = opts.into_be_bytes();
+        let lo = ETH_HDR_SIZE + self.iphdr_size() + TCP_HDR_MINSIZE;
+        let hi = lo + opts.len();
+
+        if self.0.len() < hi {
+            return Err(format!(
+                "frame is too small to hold TCP opts: data.len: {}, opt.len: {}",
+                self.len(),
+                opts.len()
+            )
+            .into());
+        }
+
+        assert!(
+            opts.len() <= TCP_OPT_MAX_SIZE,
+            "tcp options cant exceed opt max size"
+        );
+
+        self.0.as_mut_slice()[lo..hi].copy_from_slice(&opts);
+
+        assert_eq!(self.tcphdr_size(), opts.len() + TCP_HDR_MINSIZE);
+        Ok(())
+    }
+
+    /// sets the TCP checksum, needs to be called after setting the ip payload!
+    pub fn set_tcp_check(&mut self, phdr: PseudoHdr) -> Result<()> {
+        // set TCP check to 0
+        let check_off = ETH_HDR_SIZE + self.iphdr_size() + TCP_CHECK_OFFSET_FROM_HDR;
+        self.0[check_off] = 0;
+        self.0[check_off + 1] = 0;
+
+        // populate buffer for checksum calculation
+        // TODO: account for IP hdr options
+        let mut buf = [0u8; ETH_PAY_MAX_SIZE - IP_HDR_MINSIZE + TCP_PSEUDOHDR_SIZE];
+        let mut buf_off = 0;
+
+        buf[..TCP_PSEUDOHDR_SIZE].copy_from_slice(&phdr.into_be_bytes());
+        buf_off += TCP_PSEUDOHDR_SIZE;
+
+        let ip_pay = self.get_ip_pay()?;
+
+        if buf.len() < TCP_PSEUDOHDR_SIZE + ip_pay.len() {
+            return Err("intermediate checksum buffer cant hold payload".into());
+        }
+
+        buf[buf_off..buf_off + ip_pay.len()].copy_from_slice(ip_pay);
+        buf_off += ip_pay.len();
+
+        let check = calc_checksum_be(&buf[..buf_off]);
+        self.0[check_off..check_off + size_of::<u16>()].copy_from_slice(&check.to_be_bytes());
+
+        // for debug purposes only:
+        // writing into the buffer for check
+        let ctrl_off = TCP_PSEUDOHDR_SIZE + TCP_CHECK_OFFSET_FROM_HDR;
+        buf[ctrl_off..ctrl_off + size_of::<u16>()].copy_from_slice(&check.to_be_bytes());
+        debug_assert_eq!(0, calc_checksum_be(&buf[..buf_off]));
+
+        Ok(())
+    }
+
+    pub fn get_tcp_opt(&self) -> Result<Option<TCP_opts>> {
+        let tcphdr_size = self.tcphdr_size();
+        if tcphdr_size < TCP_HDR_MINSIZE {
+            return Err("frame doesnt hold TCP header".into());
+        }
+
+        let opt_size = tcphdr_size - TCP_HDR_MINSIZE;
+
+        if opt_size == 0 {
+            return Ok(None);
+        }
+
+        let lo = ETH_HDR_SIZE + self.iphdr_size() + TCP_HDR_MINSIZE;
+        let hi = lo + opt_size;
+
+        if self.len() < lo || self.len() < hi {
+            return Err("frame is too small for TCP options".into());
+        }
+
+        let opt_slice = &self.0[lo..hi];
+
+        TCP_opts::from_be_bytes(opt_slice).map(Option::Some)
+    }
+
+    pub fn get_tcp_pay(&self) -> Result<&[u8]> {
+        let ip_hdr = self.get_ip_hdr()?;
+
+        let lo = ETH_HDR_SIZE + self.iphdr_size() + self.tcphdr_size();
+        let hi = lo + ip_hdr.tot_len as usize - self.iphdr_size() - self.tcphdr_size();
+
+        if lo > self.0.len() || hi > self.0.len() {
+            return Err("frame data is too small for requested TCP payload".into());
+        }
+
+        Ok(&self.0.as_slice()[lo..hi])
+    }
+
+    /// overwrites the TCP payload with data
+    pub fn set_tcp_pay(&mut self, data: &[u8]) -> Result<()> {
+        let offset = ETH_HDR_SIZE + self.iphdr_size() + self.tcphdr_size();
+
+        if offset + data.len() > ETH_FRAME_MAX_SIZE {
+            return Err("data exceeds MTU".into());
+        }
+
+        self.0.truncate(offset);
+        self.0.extend_from_slice(data);
+
+        Ok(())
+    }
+
+    pub fn get_con(&self) -> Result<TCPCon> {
+        let ip_hdr = self.get_ip_hdr()?;
+        let tcp_hdr = self.get_tcp_hdr()?;
+
+        let con = TCPCon {
+            remote_ip: Ipv4Addr::from_octets(ip_hdr.src_addr),
+            remote_port: tcp_hdr.sport,
+            local_ip: Ipv4Addr::from_octets(ip_hdr.dest_addr),
+            local_port: tcp_hdr.dport,
+        };
+        Ok(con)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Pod, Zeroable, Default)]
 #[repr(C, packed)]
 pub struct TCP_hdr {

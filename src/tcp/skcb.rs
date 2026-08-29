@@ -5,7 +5,7 @@ use tokio::sync::mpsc::Receiver;
 use tracing::{debug, error, trace, warn};
 
 use crate::error::{Error, Result};
-use crate::eth::{ETH_P_IP, Eth_hdr, EthFrame};
+use crate::eth::{ETH_P_IP, EthHdr, EthPacket};
 use crate::ip::{IP_DF, IP_HDR_MINSIZE, IP_hdr, IPPROTO_TCP, TOS_BEST_EFFORT, TTL_START};
 use crate::tcp::{
     TCP_HDR_MINSIZE, WND_SIZE,
@@ -86,7 +86,7 @@ impl SkCb {
     }
 
     /// updates the control block
-    pub fn parse_frame(&mut self, eth: EthFrame) -> Result<TCPSegment> {
+    pub fn parse_frame(&mut self, eth: EthPacket) -> Result<TCPSegment> {
         let inc_ip_hdr = eth.get_ip_hdr()?;
         let inc_tcp_hdr = eth.get_tcp_hdr()?;
 
@@ -146,12 +146,12 @@ impl SkCb {
 
         // TODO: if this fails, close the socket
         let dmac = self.tcup.resolve_with_arp(inner.con.remote_ip).await?;
-        let eth_hdr = Eth_hdr::new(dmac, self.tcup.mac(), ETH_P_IP);
-        let frame = EthFrame::new_tcp(eth_hdr, ip_hdr, tcp_hdr, opts, tcp_pay)?;
+        let eth_hdr = EthHdr::new(dmac, self.tcup.mac(), ETH_P_IP);
+        let frame = EthPacket::new_tcp(eth_hdr, ip_hdr, tcp_hdr, opts, tcp_pay)?;
 
         debug!(
             "sending frame:\nETH:\nIP:{}\nTCP:{}\n{}\n",
-            frame.get_eth_hdr(),
+            frame.hdr(),
             frame.get_ip_hdr()?,
             frame.get_tcp_hdr()?
         );
@@ -549,7 +549,7 @@ pub enum TCPEvent {
 pub struct TCPSegment {
     pub hdr: TCP_hdr,
     pub opts: Option<TCP_opts>,
-    seg: EthFrame, // we pass the ethernet frame to reuse the allocation
+    seg: EthPacket, // we pass the ethernet frame to reuse the allocation
 }
 
 impl TCPSegment {

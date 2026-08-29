@@ -1,6 +1,6 @@
 #![allow(dead_code, unused_variables, unused_assignments)]
 
-use crate::{error::Result, types::Mac};
+use crate::{eth::Mac, tap::TapError::UdevError};
 
 use std::{
     ffi::OsStr,
@@ -8,16 +8,21 @@ use std::{
     net::IpAddr,
     os::fd::{AsRawFd, OwnedFd, RawFd},
     pin::Pin,
+    string::FromUtf8Error,
     task::{Context, Poll, ready},
 };
 
 use futures::TryStreamExt;
 use rtnetlink::{Handle, LinkUnspec, new_connection};
 use rustix::fs::{Mode, OFlags};
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
-use tracing::trace;
+use tracing::{Level, span, trace};
 use udev::MonitorSocket;
 
+/// linux tap device which can receive ethernet frames
+///
+/// on drop, the network device and all corresponding routes will disappear.
 #[derive(Debug)]
 pub struct TAPDevice {
     name: String,
@@ -37,42 +42,53 @@ impl TAPDevice {
     /// name can only be maximum 15 bytes long and should only contain ascii character
     ///
     /// can optionally be given an address and subnet
-    pub async fn new(name: impl AsRef<[u8]>, opts: TAPDeviceOptions) -> Result<Self> {
-        let name = name.as_ref();
+    pub async fn new(name: impl Into<String>, opts: TAPDeviceOptions) -> Result<Self, TapError> {
+        let name = name.into();
+        let _span = span!(Level::TRACE, "tap init", name = name).entered();
+
+        if !name.is_ascii() {
+            return Err(TapError::InvalidInput(
+                "provided name includes non ascii character".into(),
+            ));
+        }
 
         if name.len() > libc::IFNAMSIZ - 1 {
-            return Err(format!(
+            return Err(TapError::InvalidInput(format!(
                 "tapdevice init error: name is too long, got {}, max {}",
                 name.len(),
                 libc::IFNAMSIZ - 1
-            )
-            .into());
+            )));
         };
 
         // we monitor udev devices to retrieve a stable MAC address later
         // the socket needs to be set up before opening the tap device!
         let monitor_sock = udev_sock()?;
-        let tap = open_tap(name)?;
+
+        let tap = open_tap(&name)?;
 
         // set up tap device
-        let name = String::from_utf8(name.to_vec())?;
-
         let (con, handler, _) = new_connection()?;
         tokio::spawn(con);
 
         // does the order matter?
         if let Some((addr, prefix)) = opts.addr {
             if prefix > 32 {
-                return Err(format!("tapdevice init error: invalid prefix, needs to be between 0 and 32, got {prefix}").into());
+                return Err(TapError::InvalidInput(format!(
+                    "tapdevice init error: invalid prefix, needs to be between 0 and 32, got {prefix}"
+                )));
             }
             if_add_addr(&handler, name.clone(), addr, prefix).await?;
+
+            trace!("set ip addr");
         }
 
         if_link_up(&handler, name.clone()).await?;
+        trace!("tap device brought up");
 
         // wait for stable MAC address
         await_udev(monitor_sock, &name).await?;
         let mac = request_mac(tap.as_raw_fd(), name.as_bytes())?;
+        trace!(mac = %mac,"received mac");
 
         Ok(TAPDevice {
             name,
@@ -88,6 +104,11 @@ impl TAPDevice {
     }
 
     #[inline(always)]
+    pub fn dev_name(&self) -> &str {
+        &self.name
+    }
+
+    #[inline(always)]
     pub fn addr(&self) -> Option<IpAddr> {
         self.addr.map(|(addr, _)| addr)
     }
@@ -99,7 +120,7 @@ impl TAPDevice {
 }
 
 /// opens a new tap device in RW and non-blocking mode
-fn open_tap(name: impl AsRef<[u8]>) -> Result<OwnedFd> {
+fn open_tap(name: impl AsRef<[u8]>) -> Result<OwnedFd, TapError> {
     let fd = rustix::fs::open(
         "/dev/net/tun",
         OFlags::RDWR | OFlags::NONBLOCK,
@@ -114,25 +135,33 @@ fn open_tap(name: impl AsRef<[u8]>) -> Result<OwnedFd> {
             return Err(std::io::Error::last_os_error().into());
         };
     }
+
+    trace!("opened tap device");
     Ok(fd)
 }
 
 /// get a new udev socket to monitor device changes
-fn udev_sock() -> Result<MonitorSocket> {
+fn udev_sock() -> Result<MonitorSocket, TapError> {
     let socket = udev::MonitorBuilder::new()?
         .match_subsystem("net")?
         .listen()?;
+
+    trace!("set up udev sock");
     Ok(socket)
 }
 
-async fn await_udev(socket: MonitorSocket, name: impl AsRef<OsStr>) -> Result<()> {
+async fn await_udev(socket: MonitorSocket, name: impl AsRef<OsStr>) -> Result<(), TapError> {
+    trace!("awating udev");
+
     // prep a closure to iterate over the events
     let get_events = |socket: &MonitorSocket| -> io::Result<()> {
         while let Some(event) = socket.iter().next() {
-            trace!(event_type = %event.event_type());
-            trace!(sys_name = %event.sysname().display());
-            trace!(sys_path = %event.syspath().display());
-            trace!(dev_type = ?event.devtype());
+            trace!(
+                event_type = %event.event_type(),
+                sys_name = %event.sysname().display(),
+                sys_path = %event.syspath().display(),
+                dev_type = ?event.devtype()
+            );
 
             if event.sysname() == name.as_ref() {
                 trace!("found device");
@@ -145,11 +174,13 @@ async fn await_udev(socket: MonitorSocket, name: impl AsRef<OsStr>) -> Result<()
     // wrap the socket into the tokio machinery to poll it
     let async_fd = AsyncFd::new(socket)?;
     loop {
-        trace!("polling socket...");
         let mut guard = async_fd.readable().await?;
 
         match guard.try_io(|inner| get_events(inner.get_ref())) {
-            Ok(Ok(_)) => return Ok(()),
+            Ok(Ok(_)) => {
+                trace!("found device");
+                return Ok(());
+            }
 
             // TODO: this might not be ideal
             Ok(Err(e)) => break,
@@ -159,10 +190,11 @@ async fn await_udev(socket: MonitorSocket, name: impl AsRef<OsStr>) -> Result<()
             }
         }
     }
-    Err("could not find device".to_string().into())
+
+    Err(UdevError("could not find device".into()))
 }
 
-fn request_mac(fd: RawFd, name: impl AsRef<[u8]>) -> Result<Mac> {
+fn request_mac(fd: RawFd, name: impl AsRef<[u8]>) -> Result<Mac, TapError> {
     let name = name.as_ref();
     let sa_data: libc::sockaddr;
 
@@ -201,7 +233,7 @@ fn new_ifreq(name: impl AsRef<[u8]>) -> libc::ifreq {
 }
 
 /// brings the tap device online
-async fn if_link_up(handle: &Handle, if_name: impl AsRef<str>) -> Result<()> {
+async fn if_link_up(handle: &Handle, if_name: impl AsRef<str>) -> Result<(), TapError> {
     handle
         .link()
         .set(LinkUnspec::new_with_name(if_name.as_ref()).up().build())
@@ -216,12 +248,12 @@ async fn if_add_addr(
     if_name: impl Into<String>,
     addr: IpAddr,
     prefix_len: u8,
-) -> Result<()> {
+) -> Result<(), TapError> {
     let mut links = handle.link().get().match_name(if_name).execute();
     let link = links
         .try_next()
         .await?
-        .ok_or("couldnt add addr to interface".to_string())?;
+        .ok_or(UdevError("couldnt add addr to interface".to_string()))?;
 
     handle
         .address()
@@ -285,9 +317,29 @@ impl AsyncWrite for TAPDevice {
     }
 }
 
+#[derive(Error, Debug)]
+pub enum TapError {
+    #[error("{0}")]
+    InvalidInput(String),
+    #[error("{0}")]
+    Utf8Error(#[from] FromUtf8Error),
+    #[error("{0}")]
+    RtnetlinkError(#[from] rtnetlink::Error),
+    #[error("{0}")]
+    IoError(#[from] std::io::Error),
+    #[error("{0}")]
+    Errno(#[from] rustix::io::Errno),
+    #[error("if link up error")]
+    IfLinkError,
+    #[error("if addr error")]
+    IfAddrError,
+    #[error("{0}")]
+    UdevError(String),
+}
+
 #[cfg(test)]
 mod test {
-    use std::net::Ipv4Addr;
+    use std::{net::Ipv4Addr, time::Duration};
 
     use futures::StreamExt;
     use rtnetlink::packet_route::{address::AddressAttribute, link::LinkAttribute};
@@ -341,5 +393,10 @@ mod test {
                 false
             }
         }));
+
+        // uncomment these lines to check with "ip a" to confirm
+
+        // eprintln!("initiaized tap device on: {name}, {addr}/{subnet}, {}", tap.mac);
+        // tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
