@@ -204,27 +204,6 @@ impl Display for ArpMsg {
     }
 }
 
-// /// in case the ARP request was directed at us, it returns an appropiate response packet
-// pub async fn handle_arp(mut inc: EthFrame, tcup: TCup) -> Result<()> {
-//     info!("handling ARP\n");
-//
-//     let arp_packet = ArpPacket::from_be_bytes(inc.get_eth_pay()[..ARP_PACKET_SIZE].try_into()?);
-//     println!("{}\n", &arp_packet);
-//
-//     if let Some(arp_packet) = run_arp_check(arp_packet, &tcup) {
-//         let hdr = Eth_hdr::new(arp_packet.dmac.into(), arp_packet.smac.into(), ETH_P_ARP);
-//
-//         inc.set_eth_hdr(hdr);
-//         inc.set_eth_pay(&arp_packet.into_be_bytes())?;
-//
-//         println!("reply frame:\n{}\n", inc.get_eth_hdr());
-//
-//         let n = tcup.write_tap(inc).await?;
-//         println!("{n} bytes written");
-//     }
-//     Ok(())
-// }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,7 +238,7 @@ mod tests {
         msg
     }
 
-    // UNREAL SLOP INCOMING IM SO SORRY
+    // UNREAL SLOP INCOMING IM SO SORRY TO ANYONE READING THIS
 
     /// Records calls so tests can assert on merge vs. insert behavior,
     /// independent of what's actually stored.

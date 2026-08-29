@@ -131,52 +131,11 @@ impl Packet<Eth> {
         EthHdr::ref_from_prefix(self.as_slice())
             .expect("a parsed frame has sufficient len")
             .0
-        // Eth_hdr::from_be_bytes(
-        //     self.0[..ETH_HDR_SIZE]
-        //         .try_into()
-        //         .expect("we never have a frame without a header"),
-        // )
     }
 
     pub fn payload(&self) -> &[u8] {
         &self.as_slice()[ETH_PAY_OFFSET..]
     }
-
-    // fn with_cap(cap: usize) -> Result<Self> {
-    //     if cap == 0 {
-    //         return Err("capacity cant be zero".into());
-    //     }
-    //     if cap > ETH_FRAME_MAX_SIZE {
-    //         return Err("data exceeds MTU".into());
-    //     }
-    //     if cap < ETH_HDR_SIZE {
-    //         return Err("data below minimum eth hdr size".into());
-    //     }
-    //
-    //     Ok(EthFrame {
-    //         data: vec![0u8; cap],
-    //     })
-    // }
-    //
-    //
-    // pub fn get_eth_pay_mut(&mut self) -> Result<&mut [u8]> {
-    //     if self.len() < ETH_PAY_OFFSET {
-    //         return Err("no ETH payload found".into());
-    //     }
-    //
-    //     Ok(&mut self.0.as_mut_slice()[ETH_PAY_OFFSET..])
-    // }
-    //
-    // pub fn set_eth_pay(&mut self, data: &[u8]) -> Result<()> {
-    //     if ETH_PAY_OFFSET + data.len() > ETH_FRAME_MAX_SIZE {
-    //         return Err("data exceeds MTU".into());
-    //     }
-    //
-    //     self.0.truncate(ETH_HDR_SIZE);
-    //     self.0.extend_from_slice(data);
-    //
-    //     Ok(())
-    // }
 }
 
 #[derive(Debug)]
@@ -234,30 +193,6 @@ impl EthHdr {
         }
     }
 }
-
-// #[instrument(skip_all, err)]
-// pub async fn handle_frame(inc: EthFrame, tcup: TCup) -> Result<()> {
-//     let hdr = inc.get_eth_hdr();
-//     debug!("handling eth {}", hdr);
-//
-//     // TODO: handle ip datagrams not directed at us
-//
-//     match hdr.prot_type {
-//         ETH_P_IP => {
-//             handle_ip_frame(inc, tcup).await?;
-//         }
-//         ETH_P_ARP => {
-//             handle_arp(inc, tcup).await?;
-//         }
-//         ETH_P_IPV6 => (),
-//         _ => {
-//             warn!("IpV6 is not supported, dropping frame");
-//             return Ok(());
-//         }
-//     };
-//
-//     Ok(())
-// }
 
 #[cfg(test)]
 mod tests {
