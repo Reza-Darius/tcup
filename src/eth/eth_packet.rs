@@ -115,6 +115,13 @@ impl Packet<Eth> {
             return Err(EthErr::ParseError("payload is too large"));
         }
 
+        // inserting padding
+        if data.len() < ETH_FRAME_MIN_SIZE {
+            for _ in data.len()..ETH_FRAME_MIN_SIZE {
+                data.push(0);
+            }
+        }
+
         hdr.as_bytes()
             .write_to_prefix(&mut data)
             .expect("eth new: parsed frame has sufficient len");
@@ -286,39 +293,20 @@ mod tests {
         }
     }
 
-    // --- constants sanity ---
-
     #[test]
-    fn payload_and_header_sizes_add_up_to_min_frame() {
+    fn sizes_match() {
         assert_eq!(ETH_HDR_SIZE + ETH_PAY_MIN_SIZE, ETH_FRAME_MIN_SIZE);
-    }
-
-    #[test]
-    fn header_size_matches_two_macs_plus_ethertype() {
         assert_eq!(ETH_HDR_SIZE, MAC_ADDR_LEN * 2 + 2);
     }
 
-    // --- EthProt ---
 
     #[test]
-    fn eth_prot_supports_ip_and_arp() {
+    fn eth_prot() {
         assert!(EthProt::is_supported(libc::ETH_P_IP as u16));
         assert!(EthProt::is_supported(libc::ETH_P_ARP as u16));
-    }
-
-    #[test]
-    fn eth_prot_rejects_ipv6() {
-        // Ipv6 is explicitly commented out of the enum, so it must be
-        // treated as unsupported even though it's a real EtherType.
         assert!(!EthProt::is_supported(libc::ETH_P_IPV6 as u16));
-    }
-
-    #[test]
-    fn eth_prot_rejects_garbage_value() {
         assert!(!EthProt::is_supported(0xFFFF));
     }
-
-    // --- EthHdr ---
 
     #[test]
     fn eth_hdr_new_stores_macs_and_prot_type() {

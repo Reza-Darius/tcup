@@ -5,10 +5,8 @@
 use bytemuck::{Pod, Zeroable};
 use tracing::{debug, info, trace};
 
-use crate::error::Result;
-use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MAX_SIZE, EthHdr, EthPacket};
+use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MAX_SIZE, EthHdr};
 use crate::ip::{IP_HDR_MINSIZE, IPv4Hdr, IPPROTO_ICMP, TOS_BEST_EFFORT, TTL_START};
-use crate::tcup::TCup;
 use crate::utils::calc_checksum_be;
 
 const TYPE_ECHO_REPLY: u8 = 0;

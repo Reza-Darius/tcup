@@ -7,7 +7,7 @@ pub enum EthErr {
     #[error("{0}")]
     ParseError(&'static str),
     #[error("{0}")]
-    Mac(String),
+    MacError(String),
     #[error("{0}")]
     IpError(#[from] IpErr),
     #[error("unsupported eternet protocol")]

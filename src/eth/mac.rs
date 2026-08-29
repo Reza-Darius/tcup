@@ -40,13 +40,13 @@ impl std::str::FromStr for Mac {
 
         for part in s.split(':') {
             if count == 6 {
-                return Err(EthErr::Mac("invalid string for MAC conversion".into()));
+                return Err(EthErr::MacError("invalid string for MAC conversion".into()));
             }
-            mac_parsed[count] = part.parse::<u8>().map_err(|e| EthErr::Mac(format!("parse error: {e}")))?;
+            mac_parsed[count] = part.parse::<u8>().map_err(|e| EthErr::MacError(format!("parse error: {e}")))?;
             count += 1;
         }
         if count != 6 {
-                return Err(EthErr::Mac("invalid string for MAC conversion".into()));
+                return Err(EthErr::MacError("invalid string for MAC conversion".into()));
         }
 
         Ok(Mac(mac_parsed))
