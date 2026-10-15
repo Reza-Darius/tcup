@@ -1,10 +1,15 @@
 #![allow(dead_code, unused_variables, unused_assignments)]
 
-use crate::{eth::Mac, tap::TapError::UdevError};
+use crate::{
+    eth::{ETH_FRAME_MAX_SIZE, Mac},
+    tap::TapError::UdevError,
+    utils::packet::{Eth, Packet},
+};
 
 use std::{
     ffi::OsStr,
     io,
+    mem::MaybeUninit,
     net::IpAddr,
     os::fd::{AsRawFd, OwnedFd, RawFd},
     pin::Pin,
@@ -12,12 +17,12 @@ use std::{
     task::{Context, Poll, ready},
 };
 
-use futures::TryStreamExt;
+use futures::{Stream, TryStreamExt};
 use rtnetlink::{Handle, LinkUnspec, new_connection};
 use rustix::fs::{Mode, OFlags};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
-use tracing::{Level, span, trace};
+use tracing::{instrument, trace};
 use udev::MonitorSocket;
 
 /// linux tap device which can receive ethernet frames
@@ -37,14 +42,18 @@ pub struct TAPDeviceOptions {
 }
 
 impl TAPDevice {
-    /// creates a new TAP network device, requires elevated privleges
+    /// creates a new TAP network device, requires CAP_NET_ADMIN privleges
     ///
     /// name can only be maximum 15 bytes long and should only contain ascii character
     ///
     /// can optionally be given an address and subnet
+    ///
+    /// # Panic:
+    ///
+    /// This function panics if called outside of a tokio context.
+    #[instrument(skip_all)]
     pub async fn new(name: impl Into<String>, opts: TAPDeviceOptions) -> Result<Self, TapError> {
         let name = name.into();
-        let _span = span!(Level::TRACE, "tap init", name = name).entered();
 
         if !name.is_ascii() {
             return Err(TapError::InvalidInput(
@@ -94,7 +103,8 @@ impl TAPDevice {
             name,
             addr: opts.addr,
             mac,
-            fd: AsyncFd::new(tap)?,
+            // SAFETY: the asyncfd takes ownership of the FD
+            fd: unsafe { AsyncFd::register(tap)? },
         })
     }
 
@@ -116,6 +126,13 @@ impl TAPDevice {
     #[inline(always)]
     pub fn subnet(&self) -> Option<u8> {
         self.addr.map(|(_, sub)| sub)
+    }
+
+    pub fn into_stream(self) -> TAPStream {
+        TAPStream {
+            buf: Box::new_uninit_slice(ETH_FRAME_MAX_SIZE),
+            tap: self,
+        }
     }
 }
 
@@ -172,7 +189,8 @@ async fn await_udev(socket: MonitorSocket, name: impl AsRef<OsStr>) -> Result<()
     };
 
     // wrap the socket into the tokio machinery to poll it
-    let async_fd = AsyncFd::new(socket)?;
+    // SAFETY: the asyncfd takes ownership of the FD
+    let async_fd = unsafe { AsyncFd::register(socket)? };
     loop {
         let mut guard = async_fd.readable().await?;
 
@@ -217,7 +235,7 @@ fn request_mac(fd: RawFd, name: impl AsRef<[u8]>) -> Result<Mac, TapError> {
     ]))
 }
 
-/// construct an ifreq strcut with a name and all other fields zeroed
+/// construct an ifreq struct with a name and all other fields zeroed
 fn new_ifreq(name: impl AsRef<[u8]>) -> libc::ifreq {
     unsafe {
         let name = name.as_ref();
@@ -261,6 +279,35 @@ async fn if_add_addr(
         .execute()
         .await
         .map_err(Into::into)
+}
+
+pin_project_lite::pin_project! {
+    pub struct TAPStream {
+        buf: Box<[MaybeUninit<u8>]>,
+        #[pin]
+        tap: TAPDevice,
+    }
+}
+
+impl Stream for TAPStream {
+    type Item = io::Result<Packet<Eth>>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+
+        let mut read_buf = ReadBuf::uninit(this.buf);
+        let _ = ready!(this.tap.poll_read(cx, &mut read_buf));
+
+        trace!("read {} bytes in stream", read_buf.filled().len());
+
+        match Packet::<Eth>::parse(read_buf.filled()) {
+            Ok(packet) => Poll::Ready(Some(Ok(packet))),
+            Err(e) => {
+                trace!(%e, "failed to parse frame");
+                Poll::Ready(None)
+            }
+        }
+    }
 }
 
 impl AsyncRead for TAPDevice {
@@ -335,11 +382,15 @@ pub enum TapError {
     IfAddrError,
     #[error("{0}")]
     UdevError(String),
+    #[error("{0}")]
+    TokioTapError(#[from] tokio::io::unix::AsyncFdRegisterError<rustix::fd::OwnedFd>),
+    #[error("{0}")]
+    TokioUdevError(#[from] tokio::io::unix::AsyncFdRegisterError<MonitorSocket>),
 }
 
 #[cfg(test)]
 mod test {
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::net::Ipv4Addr;
 
     use futures::StreamExt;
     use rtnetlink::packet_route::{address::AddressAttribute, link::LinkAttribute};

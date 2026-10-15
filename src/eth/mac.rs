@@ -23,7 +23,8 @@ impl Mac {
 impl std::fmt::Display for Mac {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let buf = &self.0;
-        write!(f,
+        write!(
+            f,
             "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
             buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]
         )
@@ -42,11 +43,13 @@ impl std::str::FromStr for Mac {
             if count == 6 {
                 return Err(EthErr::MacError("invalid string for MAC conversion".into()));
             }
-            mac_parsed[count] = part.parse::<u8>().map_err(|e| EthErr::MacError(format!("parse error: {e}")))?;
+            mac_parsed[count] = part
+                .parse::<u8>()
+                .map_err(|e| EthErr::MacError(format!("parse error: {e}")))?;
             count += 1;
         }
         if count != 6 {
-                return Err(EthErr::MacError("invalid string for MAC conversion".into()));
+            return Err(EthErr::MacError("invalid string for MAC conversion".into()));
         }
 
         Ok(Mac(mac_parsed))

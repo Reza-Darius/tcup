@@ -1,9 +1,9 @@
-mod eth_packet;
 mod arp;
-mod mac;
 mod error;
+mod eth_packet;
+mod mac;
 
-pub use eth_packet::*;
 pub use arp::*;
-pub use mac::*;
 pub use error::EthErr;
+pub use eth_packet::*;
+pub use mac::*;

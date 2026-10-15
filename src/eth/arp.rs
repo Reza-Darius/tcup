@@ -160,8 +160,6 @@ pub struct ArpMsg {
     pub dip: [u8; IP_ADDR_LEN],   // (ar$tpa) Protocol address of target
 }
 
-impl ArpMsg {}
-
 pub trait ArpStore {
     /// if and only if smac and sip are in the store, update it the entry and return true
     fn update_if_present(&mut self, smac: Mac, sip: Ipv4Addr) -> bool;

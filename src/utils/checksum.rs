@@ -43,7 +43,6 @@ pub fn calc_checksum_be(bytes: &[u8]) -> u16 {
 // }
 //
 
-
 /// from 24 to 255.255.255.0
 pub fn cidr_to_mask(subnet: u8) -> u32 {
     assert!(subnet != 0);

@@ -4,5 +4,3 @@ pub mod packet;
 
 pub use checksum::*;
 pub use gateway::*;
-
-

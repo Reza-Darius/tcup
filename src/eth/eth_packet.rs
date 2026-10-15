@@ -30,7 +30,6 @@ const ETH_PAY_OFFSET: usize = ETH_HDR_SIZE;
 pub enum EthProt {
     Ip = libc::ETH_P_IP as u16,
     Arp = libc::ETH_P_ARP as u16,
-    // Ipv6 = libc::ETH_P_IPV6 as u16,
 }
 
 impl EthProt {
@@ -45,13 +44,13 @@ impl Packet<Eth> {
         let data = data.into();
 
         if data.len() > ETH_FRAME_MAX_SIZE {
-            return Err(ParseError("data exceeds MTU size"));
+            return Err(ParseError("data exceeds eth frame max size"));
         }
 
         // TODO: do we need more validaton?
 
         if data.len() < ETH_HDR_SIZE {
-            return Err(ParseError("data below minimumt hdr size"));
+            return Err(ParseError("data below minimum hdr size"));
         }
 
         let hdr = EthHdr::read_from_prefix(&data)
@@ -160,9 +159,11 @@ impl From<Packet<Ipv4>> for EthPayload {
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C, packed)]
 pub struct EthHdr {
-    pub dmac: [u8; MAC_ADDR_LEN], // dest MAC address
-    pub smac: [u8; MAC_ADDR_LEN], // src MAC address
-    pub prot_type: U16<BE>,
+    /// destination MAC address
+    pub dmac: [u8; MAC_ADDR_LEN],
+    /// source MAC address
+    pub smac: [u8; MAC_ADDR_LEN],
+    prot_type: U16<BE>,
 }
 
 impl std::fmt::Display for EthHdr {
@@ -192,6 +193,13 @@ impl EthHdr {
             smac: smac.into().octets(),
             prot_type: zerocopy::U16::<BE>::new(prot_type as u16),
         }
+    }
+
+    pub fn prot(&self) -> EthProt {
+        self.prot_type
+            .get()
+            .try_into()
+            .expect("unsupported protocol")
     }
 }
 
@@ -228,11 +236,10 @@ mod tests {
     }
 
     #[test]
-    fn sizes_match() {
+    fn eth_constants() {
         assert_eq!(ETH_HDR_SIZE + ETH_PAY_MIN_SIZE, ETH_FRAME_MIN_SIZE);
         assert_eq!(ETH_HDR_SIZE, MAC_ADDR_LEN * 2 + 2);
     }
-
 
     #[test]
     fn eth_prot() {

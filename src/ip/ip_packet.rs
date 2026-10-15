@@ -2,7 +2,6 @@ use std::net::Ipv4Addr;
 
 use bytes::BufMut;
 use num_enum::TryFromPrimitive;
-use tracing::error;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
 use crate::eth::Mac;
@@ -85,8 +84,6 @@ impl Packet<Ipv4> {
             .0;
 
         if !hdr.is_fragmented() {
-            let hdr_frag = hdr.frag_off;
-            error!("{:b}", hdr_frag);
             return Err(ParseError("fragmentation is not supported".into()));
         }
 
@@ -133,19 +130,24 @@ impl Packet<Ipv4> {
             ));
         }
 
-        let hdr = IPv4Hdr::new(src_addr, dest_addr, prot, &data);
-        hdr.write_to_prefix(&mut data[IP_HDR_OFFSET..])
+        IPv4Hdr::new(src_addr, dest_addr, prot, &data)
+            .write_to_prefix(&mut data[IP_HDR_OFFSET..])
             .expect("there should be enough space");
 
-        Ok(data.into())
+        let mut packet: Packet<Ipv4> = data.into();
+        packet.set_checksum();
+
+        Ok(packet)
     }
 
+    #[inline(always)]
     pub fn prot(&self) -> Ipv4Prot {
         self.as_slice()[IP_CHECK_OFFSET]
             .try_into()
             .expect("the packet is parsed")
     }
 
+    #[inline(always)]
     pub fn to_eth(self, dmac: impl Into<Mac>, smac: impl Into<Mac>) -> Result<Packet<Eth>, IpErr> {
         Packet::<Eth>::new(dmac, smac, self.into())
             .map_err(|e| IpErr::ConversionError(format!("failed to create eth packet {e}")))
@@ -171,20 +173,8 @@ impl Packet<Ipv4> {
     }
 
     #[inline(always)]
-    fn set_hdr(&mut self, hdr: IPv4Hdr) {
-        // currently doesnt support IP options
-        assert_eq!(
-            hdr.len(),
-            IP_HDR_MINSIZE,
-            "ip options arent supported currently"
-        );
-        hdr.write_to_prefix(&mut self.as_slice_mut()[IP_HDR_OFFSET..])
-            .expect("set ip hdr: the packet is parsed");
-    }
-
-    #[inline(always)]
-    fn set_ip_check(&mut self) {
-        debug_assert!(self.len() < IP_CHECK_OFFSET + 1);
+    fn set_checksum(&mut self) {
+        debug_assert!(self.len() > IP_CHECK_OFFSET + 1);
 
         let offset = IP_CHECK_OFFSET;
 
@@ -225,18 +215,23 @@ impl From<Packet<Icmp>> for Ipv4Payload {
 #[derive(Default, Debug, Clone, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C, packed)]
 pub struct IPv4Hdr {
-    pub ver_ihl: u8, // 4 bits for version and IHL (internet header length)
-    pub tos: u8,     // type of service, in newer versiond the first 6 bits are the
-    // "differentiated server field" (DS field)
-    pub tot_len: U16<BE>, // length of the whole IP datagram
-    pub id: U16<BE>,
-    pub frag_off: U16<BE>, // first 3 bits are flags, rest offset
-    pub ttl: u8,           // time to live
-    pub prot: u8,
-    pub checksum: U16<BE>, // only covers the IP header
+    /// 4 bits for version and IHL (internet header length)
+    ver_ihl: u8,
+    /// type of service, in newer versiond the first 6 bits are the "differentiated server field" (DS field)
+    tos: u8,
+    /// length of the whole IP datagram
+    tot_len: U16<BE>,
+    id: U16<BE>,
+    // first 3 bits are flags, rest offset
+    frag_off: U16<BE>,
+    /// time to live
+    ttl: u8,
+    prot: u8,
+    /// only covers the IP header
+    checksum: U16<BE>,
 
-    pub src_addr: [u8; 4],
-    pub dest_addr: [u8; 4],
+    src_addr: [u8; 4],
+    dest_addr: [u8; 4],
 }
 
 impl IPv4Hdr {
@@ -259,21 +254,31 @@ impl IPv4Hdr {
 
         hdr
     }
+
+    #[inline(always)]
+    pub fn prot(&self) -> Ipv4Prot {
+        self.prot.try_into().expect("parsed is always a valid prot")
+    }
+
     /// sets the header size, takes the length in bytes as argument
+    #[inline(always)]
     fn set_ihl(&mut self, version: u8, len: usize) {
         self.ver_ihl = (version << 4) | (len as u8 >> 2);
     }
 
     /// retrieves the size of the IP header in bytes
     #[allow(clippy::len_without_is_empty)]
+    #[inline(always)]
     pub fn len(&self) -> usize {
         get_hdr_len(self.ver_ihl)
     }
 
+    #[inline(always)]
     pub fn version(&self) -> u8 {
         get_hdr_ver(self.ver_ihl)
     }
 
+    #[inline(always)]
     pub fn is_fragmented(&self) -> bool {
         (self.frag_off & IP_MF == 0) && (self.frag_off & FRAG_OFFSET_MASK == 0)
     }
@@ -328,4 +333,3 @@ impl std::fmt::Display for IPv4Hdr {
 //         _ => Err("IP protocol not supported".into()),
 //     }
 // }
-

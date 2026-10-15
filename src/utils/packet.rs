@@ -30,13 +30,19 @@ impl<P: PacketType> NetworkPacket for Packet<P> {
 
     /// unsafe conversion, reserved parsing functions
     fn from_vec(data: Vec<u8>) -> Self {
-        Packet{ data, l_type: PhantomData }
+        Packet {
+            data,
+            l_type: PhantomData,
+        }
     }
 }
 
 impl<P: PacketType> From<Vec<u8>> for Packet<P> {
     fn from(value: Vec<u8>) -> Self {
-        Packet{ data: value, l_type: PhantomData }
+        Packet {
+            data: value,
+            l_type: PhantomData,
+        }
     }
 }
 
