@@ -2,7 +2,7 @@ use num_enum::TryFromPrimitive;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
 use super::mac::*;
-use crate::eth::EthErr::{BuildError, InvalidProtError, ParseError};
+use crate::eth::EthErr::{InvalidProtError, ParseError};
 use crate::eth::error::EthErr;
 use crate::utils::packet::*;
 
@@ -70,7 +70,7 @@ impl Packet<Eth> {
         let hdr = *self.hdr();
 
         let pay = match self.prot() {
-            EthProt::Arp => EthPayload::Arp(Packet::<Arp>::parse(self)?),
+            EthProt::Arp => EthPayload::Arp(Packet::<ARP>::parse(self)?),
             EthProt::Ip => EthPayload::Ip(Packet::<Ipv4>::parse(self)?),
         };
 
@@ -88,11 +88,7 @@ impl Packet<Eth> {
     }
 
     /// construct a new frame, this reuses the payload allocation
-    pub fn new(
-        dmac: impl Into<Mac>,
-        smac: impl Into<Mac>,
-        payload: EthPayload,
-    ) -> Result<Packet<Eth>, EthErr> {
+    pub fn new(dmac: impl Into<Mac>, smac: impl Into<Mac>, payload: EthPayload) -> Packet<Eth> {
         let prot;
         let mut data = match payload {
             EthPayload::Arp(packet) => {
@@ -105,15 +101,10 @@ impl Packet<Eth> {
             }
         };
 
+        debug_assert!(data.len() >= ETH_HDR_SIZE);
+        debug_assert!(data.len() <= ETH_FRAME_MIN_SIZE);
+
         let hdr = EthHdr::new(dmac, smac, prot);
-
-        if data.len() < ETH_HDR_SIZE {
-            return Err(BuildError("payload size doesnt add up"));
-        }
-
-        if data.len() > ETH_FRAME_MAX_SIZE {
-            return Err(BuildError("payload is too large"));
-        }
 
         // inserting padding
         if data.len() < ETH_FRAME_MIN_SIZE {
@@ -124,7 +115,7 @@ impl Packet<Eth> {
             .write_to_prefix(&mut data)
             .expect("eth new: parsed frame has sufficient len");
 
-        Ok(Packet::from_vec(data))
+        Packet::from_vec(data)
     }
 
     pub fn hdr(&self) -> &EthHdr {
@@ -140,12 +131,12 @@ impl Packet<Eth> {
 
 #[derive(Debug)]
 pub enum EthPayload {
-    Arp(Packet<Arp>),
+    Arp(Packet<ARP>),
     Ip(Packet<Ipv4>),
 }
 
-impl From<Packet<Arp>> for EthPayload {
-    fn from(value: Packet<Arp>) -> Self {
+impl From<Packet<ARP>> for EthPayload {
+    fn from(value: Packet<ARP>) -> Self {
         EthPayload::Arp(value)
     }
 }
@@ -213,7 +204,7 @@ mod tests {
     const SMAC: [u8; MAC_ADDR_LEN] = [0xBB; MAC_ADDR_LEN];
 
     fn valid_arp_eth_bytes() -> Vec<u8> {
-        Packet::<Arp>::new_request(
+        Packet::<ARP>::new_request(
             Mac::from_octets(SMAC),
             Ipv4Addr::new(10, 0, 0, 2),
             Ipv4Addr::new(10, 0, 0, 1),
@@ -302,10 +293,9 @@ mod tests {
 
     #[test]
     fn new_writes_requested_macs_and_prot_into_header() {
-        let payload = EthPayload::Arp(Packet::<Arp>::new(dummy_arp_msg()));
+        let payload = EthPayload::Arp(Packet::<ARP>::new(dummy_arp_msg()));
 
-        let eth = Packet::<Eth>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), payload)
-            .expect("valid construction");
+        let eth = Packet::<Eth>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), payload);
 
         assert_eq!(eth.hdr().dmac, DMAC);
         assert_eq!(eth.hdr().smac, SMAC);
@@ -313,13 +303,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn new_rejects_oversized_payload() {
         // Bypass the normal Arp constructors (which always produce a
         // small, MTU-safe frame) to exercise the size guard directly.
-        let oversized = EthPayload::Arp(Packet::<Arp>::from_vec(vec![0u8; ETH_FRAME_MAX_SIZE + 1]));
-
-        let result = Packet::<Eth>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), oversized);
-        assert!(matches!(result, Err(EthErr::ParseError(_))));
+        let oversized = EthPayload::Arp(Packet::<ARP>::from_vec(vec![0u8; ETH_FRAME_MAX_SIZE + 1]));
+        Packet::<Eth>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), oversized);
     }
 
     // --- into_parts ---

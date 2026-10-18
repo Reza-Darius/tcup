@@ -13,7 +13,7 @@ use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MIN_SIZE};
 
 const ARP_PACKET_SIZE: usize = std::mem::size_of::<ArpMsg>();
 
-impl Packet<Arp> {
+impl Packet<ARP> {
     pub(super) fn parse(eth: Packet<Eth>) -> Result<Self, EthErr> {
         let data = eth.into_vec();
         let arp = ArpMsg::ref_from_prefix(&data[ETH_HDR_SIZE..])
@@ -56,7 +56,7 @@ impl Packet<Arp> {
             hwtype: libc::ARPHRD_ETHER.into(),
             prot_type: (libc::ETH_P_IP as u16).into(),
             hwsize: MAC_ADDR_LEN as u8,
-            prosize: IP_ADDR_LEN as u8,
+            prosize: IP_ADDR_LEN,
             opcode: libc::ARPOP_REQUEST.into(),
             smac: smac.octets(),
             sip: sip.octets(),
@@ -64,8 +64,7 @@ impl Packet<Arp> {
             dip: target_ip.octets(),
         };
 
-        Packet::<Eth>::new(Mac::BROADCAST, smac, Packet::<Arp>::new(arp).into())
-            .expect("the values are hard coded")
+        Packet::<Eth>::new(Mac::BROADCAST, smac, Packet::<ARP>::new(arp).into())
     }
 
     /// runs the ARP packet reception algorithm according to RFC 826, returning a packet in case we
@@ -136,10 +135,7 @@ impl Packet<Arp> {
 
             self.set_hdr(arp_packet);
 
-            return Some(
-                Packet::<Eth>::new(sender_mac, host_mac, self.into())
-                    .expect("the values are hard coded"),
-            );
+            return Some(Packet::<Eth>::new(sender_mac, host_mac, self.into()));
         }
         None
     }
@@ -157,9 +153,9 @@ pub struct ArpMsg {
 
     // Payload
     pub smac: [u8; MAC_ADDR_LEN], // (ar$sha) Hardware address of sender
-    pub sip: [u8; IP_ADDR_LEN],   // (ar$spa) Protocol address of sender
+    pub sip: [u8; IP_ADDR_LEN as usize], // (ar$spa) Protocol address of sender
     pub dmac: [u8; MAC_ADDR_LEN], // (ar$tha) Hardware address of target (if known)
-    pub dip: [u8; IP_ADDR_LEN],   // (ar$tpa) Protocol address of target
+    pub dip: [u8; IP_ADDR_LEN as usize], // (ar$tpa) Protocol address of target
 }
 
 /// interface for an ARP store keyed by ip address
@@ -223,7 +219,7 @@ mod tests {
             hwtype: libc::ARPHRD_ETHER.into(),
             prot_type: (libc::ETH_P_IP as u16).into(),
             hwsize: MAC_ADDR_LEN as u8,
-            prosize: IP_ADDR_LEN as u8,
+            prosize: IP_ADDR_LEN,
             opcode: libc::ARPOP_REQUEST.into(),
             smac: SENDER_MAC.octets(),
             sip: SENDER_IP.octets(),
@@ -276,7 +272,7 @@ mod tests {
 
     #[test]
     fn request_directed_at_host_generates_reply() {
-        let packet = Packet::<Arp>::new(base_request(HOST_IP));
+        let packet = Packet::<ARP>::new(base_request(HOST_IP));
         let mut store = MockStore::default();
 
         let reply_eth = packet
@@ -284,7 +280,7 @@ mod tests {
             .expect("expected a reply packet");
 
         let reply_arp =
-            Packet::<Arp>::parse(reply_eth).expect("reply should be a valid parseable ARP packet");
+            Packet::<ARP>::parse(reply_eth).expect("reply should be a valid parseable ARP packet");
         let hdr = reply_arp.hdr();
 
         assert_eq!(hdr.opcode.get(), libc::ARPOP_REPLY);
@@ -296,7 +292,7 @@ mod tests {
 
     #[test]
     fn request_not_directed_at_host_returns_none() {
-        let packet = Packet::<Arp>::new(base_request(OTHER_IP));
+        let packet = Packet::<ARP>::new(base_request(OTHER_IP));
         let mut store = MockStore::default();
 
         let result = packet.run_arp_check(&mut store);
@@ -305,7 +301,7 @@ mod tests {
 
     #[test]
     fn reply_directed_at_host_updates_table_and_sends_nothing() {
-        let packet = Packet::<Arp>::new(base_reply(HOST_IP));
+        let packet = Packet::<ARP>::new(base_reply(HOST_IP));
         let mut store = MockStore::default();
 
         let result = packet.run_arp_check(&mut store);
@@ -317,7 +313,7 @@ mod tests {
     fn unsupported_hwtype_is_ignored() {
         let mut msg = base_request(HOST_IP);
         msg.hwtype = 0xFFFF.into();
-        let packet = Packet::<Arp>::new(msg);
+        let packet = Packet::<ARP>::new(msg);
         let mut store = MockStore::default();
 
         assert!(packet.run_arp_check(&mut store).is_none());
@@ -329,7 +325,7 @@ mod tests {
     fn unsupported_protocol_type_is_ignored() {
         let mut msg = base_request(HOST_IP);
         msg.prot_type = (libc::ETH_P_IPV6 as u16).into();
-        let packet = Packet::<Arp>::new(msg);
+        let packet = Packet::<ARP>::new(msg);
         let mut store = MockStore::default();
 
         assert!(packet.run_arp_check(&mut store).is_none());
@@ -339,7 +335,7 @@ mod tests {
 
     #[test_log::test]
     fn existing_sender_is_updated_not_inserted() {
-        let packet = Packet::<Arp>::new(base_request(HOST_IP));
+        let packet = Packet::<ARP>::new(base_request(HOST_IP));
         let mut store = MockStore::with_known(SENDER_MAC, SENDER_IP);
 
         let _ = packet.run_arp_check(&mut store);
@@ -350,7 +346,7 @@ mod tests {
 
     #[test]
     fn new_sender_is_inserted_after_failed_update() {
-        let packet = Packet::<Arp>::new(base_request(HOST_IP));
+        let packet = Packet::<ARP>::new(base_request(HOST_IP));
         let mut store = MockStore::default();
 
         let _ = packet.run_arp_check(&mut store);
@@ -363,7 +359,7 @@ mod tests {
     #[test]
     fn new_arp_message_round_trips_through_parse() {
         let original = base_request(HOST_IP);
-        let packet = Packet::<Arp>::new(original.clone());
+        let packet = Packet::<ARP>::new(original.clone());
 
         // Wrap the raw ARP packet bytes in a minimal Eth frame's worth of
         // padding so Packet::<Arp>::parse can strip ETH_HDR_SIZE back off.
@@ -385,8 +381,8 @@ mod tests {
         let sip = SENDER_IP;
         let target = HOST_IP;
 
-        let eth = Packet::<Arp>::new_request(smac, sip, target);
-        let arp = Packet::<Arp>::parse(eth).expect("should parse back out");
+        let eth = Packet::<ARP>::new_request(smac, sip, target);
+        let arp = Packet::<ARP>::parse(eth).expect("should parse back out");
         let hdr = arp.hdr();
 
         assert_eq!(hdr.opcode.get(), libc::ARPOP_REQUEST);

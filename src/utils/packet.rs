@@ -99,17 +99,17 @@ pub struct Eth;
 impl PacketType for Eth {}
 
 #[derive(Debug, Clone, Copy)]
-pub struct Arp;
-impl PacketType for Arp {}
+pub struct ARP;
+impl PacketType for ARP {}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ipv4;
 impl PacketType for Ipv4 {}
 
 #[derive(Debug, Clone, Copy)]
-pub struct Tcp;
-impl PacketType for Tcp {}
+pub struct TCP;
+impl PacketType for TCP {}
 
 #[derive(Debug, Clone, Copy)]
-pub struct Icmp;
-impl PacketType for Icmp {}
+pub struct ICMP;
+impl PacketType for ICMP {}

@@ -13,9 +13,9 @@ use crate::{
     utils::{calc_checksum_be, packet::Packet},
 };
 
-pub const IP_HDR_MINSIZE: usize = 20;
-pub const IP_HDR_MAXSIZE: usize = 60;
-pub const IP_ADDR_LEN: usize = 4;
+pub const IP_HDR_MINSIZE: u8 = 20;
+pub const IP_HDR_MAXSIZE: u8 = 60;
+pub const IP_ADDR_LEN: u8 = 4;
 pub const TOS_BEST_EFFORT: u8 = 0;
 
 pub const TTL_START: u8 = 64;
@@ -35,7 +35,7 @@ const IP_CHECK_OFFSET: usize = ETH_HDR_SIZE + 10;
 /// offset for protocol byte
 const IP_PROT_OFFSET: usize = ETH_HDR_SIZE + 10;
 /// payloard offset without options
-const IP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE;
+const IP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE as usize;
 
 #[derive(TryFromPrimitive, PartialEq, Clone, Copy, Debug)]
 #[repr(u8)]
@@ -48,8 +48,14 @@ impl Packet<Ipv4> {
     pub fn parse(pck: Packet<Eth>) -> Result<Self, IpErr> {
         let packet = pck.into_vec();
         let eth_pay = &packet.as_bytes()[IP_HDR_OFFSET..];
+        let hdr_size = get_hdr_len(eth_pay[0]);
 
-        if eth_pay.len() < IP_HDR_MINSIZE {
+        let check = calc_checksum_be(&eth_pay[..hdr_size as usize]);
+        if check != 0 {
+            return Err(ParseError(format!("invalid IP checksum: {check:x}")));
+        }
+
+        if eth_pay.len() < IP_HDR_MINSIZE as usize {
             return Err(ParseError("eth_pay is too small for IP header".into()));
         }
 
@@ -57,9 +63,7 @@ impl Packet<Ipv4> {
             return Err(ParseError("not supported IP version".into()));
         }
 
-        let hdr_size = get_hdr_len(eth_pay[0]);
-
-        if hdr_size > eth_pay.len() {
+        if hdr_size as usize > eth_pay.len() {
             return Err(ParseError(
                 "frame smaller than declared header length".into(),
             ));
@@ -74,11 +78,6 @@ impl Packet<Ipv4> {
             return Err(ParseError("IP header above supported 20 bytes".into()));
         }
 
-        let check = calc_checksum_be(&eth_pay[..hdr_size]);
-        if check != 0 {
-            return Err(ParseError(format!("invalid IP checksum: {check:x}")));
-        }
-
         let hdr = IPv4Hdr::read_from_prefix(eth_pay)
             .map_err(|e| ParseError(format!("couldnt extract header: {e}")))?
             .0;
@@ -87,7 +86,7 @@ impl Packet<Ipv4> {
             return Err(ParseError("fragmentation is not supported".into()));
         }
 
-        if (hdr.tot_len.get() as usize) < hdr_size {
+        if hdr.tot_len.get() < hdr_size as u16 {
             return Err(ParseError("total length smaller than header len".into()));
         };
 
@@ -124,7 +123,7 @@ impl Packet<Ipv4> {
             }
         };
 
-        if data.len() < IP_PAY_OFFSET + IP_HDR_MINSIZE {
+        if data.len() < IP_PAY_OFFSET + IP_HDR_MINSIZE as usize {
             return Err(BuildError(
                 "invalid size: data len is lower than required".to_string(),
             ));
@@ -147,15 +146,15 @@ impl Packet<Ipv4> {
             .expect("the packet is parsed")
     }
 
+    /// convenience function
     #[inline(always)]
-    pub fn to_eth(self, dmac: impl Into<Mac>, smac: impl Into<Mac>) -> Result<Packet<Eth>, IpErr> {
+    pub fn to_eth(self, dmac: impl Into<Mac>, smac: impl Into<Mac>) -> Packet<Eth> {
         Packet::<Eth>::new(dmac, smac, self.into())
-            .map_err(|e| IpErr::ConversionError(format!("failed to create eth packet {e}")))
     }
 
     /// reads the header length of the ip packet: 20 byte + options
     #[inline(always)]
-    pub fn hdr_len(&self) -> usize {
+    pub fn hdr_len(&self) -> u8 {
         // the len field is in the first byte
         let res = get_hdr_len(self.as_slice()[IP_HDR_OFFSET]);
         debug_assert!(
@@ -182,36 +181,41 @@ impl Packet<Ipv4> {
         self.as_slice_mut()[offset] = 0;
         self.as_slice_mut()[offset + 1] = 0;
 
-        let check = calc_checksum_be(&self.as_slice()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len()]);
+        let check = calc_checksum_be(
+            &self.as_slice()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len() as usize],
+        );
         (&mut self.as_slice_mut()[offset..]).put_u16(check);
         // self.data[offset..offset + size_of::<u16>()].copy_from_slice(&u16::to_be_bytes(check));
 
         debug_assert_eq!(
             0,
-            calc_checksum_be(&self.as_slice()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len()]),
-            "checksum failed"
+            calc_checksum_be(
+                &self.as_slice()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len() as usize]
+            ),
+            "set checksum failed"
         );
     }
 }
 
 #[derive(Debug)]
 pub enum Ipv4Payload {
-    Tcp(Packet<Tcp>),
-    Icmp(Packet<Icmp>),
+    Tcp(Packet<TCP>),
+    Icmp(Packet<ICMP>),
 }
 
-impl From<Packet<Tcp>> for Ipv4Payload {
-    fn from(value: Packet<Tcp>) -> Self {
+impl From<Packet<TCP>> for Ipv4Payload {
+    fn from(value: Packet<TCP>) -> Self {
         Ipv4Payload::Tcp(value)
     }
 }
 
-impl From<Packet<Icmp>> for Ipv4Payload {
-    fn from(value: Packet<Icmp>) -> Self {
+impl From<Packet<ICMP>> for Ipv4Payload {
+    fn from(value: Packet<ICMP>) -> Self {
         Ipv4Payload::Icmp(value)
     }
 }
 
+/// IPv4 Header without options
 #[derive(Default, Debug, Clone, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C, packed)]
 pub struct IPv4Hdr {
@@ -249,7 +253,9 @@ impl IPv4Hdr {
             dest_addr: dest_addr.octets(),
         };
 
-        hdr.set_ihl(4, payload.len() + IP_HDR_MINSIZE);
+        debug_assert!(payload.len() <= u16::MAX as usize);
+
+        hdr.set_ihl(4, payload.len() as u16 + IP_HDR_MINSIZE as u16);
         hdr.checksum = calc_checksum_be(payload).into();
 
         hdr
@@ -262,14 +268,14 @@ impl IPv4Hdr {
 
     /// sets the header size, takes the length in bytes as argument
     #[inline(always)]
-    fn set_ihl(&mut self, version: u8, len: usize) {
+    fn set_ihl(&mut self, version: u8, len: u16) {
         self.ver_ihl = (version << 4) | (len as u8 >> 2);
     }
 
     /// retrieves the size of the IP header in bytes
     #[allow(clippy::len_without_is_empty)]
     #[inline(always)]
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> u8 {
         get_hdr_len(self.ver_ihl)
     }
 
@@ -286,8 +292,8 @@ impl IPv4Hdr {
 
 /// retrieves the header len of the first byte of an ipv4 header
 #[inline(always)]
-fn get_hdr_len(tot_len: u8) -> usize {
-    ((tot_len & 0x0F) << 2) as usize
+fn get_hdr_len(tot_len: u8) -> u8 {
+    (tot_len & 0x0F) << 2
 }
 
 /// retrieves the version declared in the first header byte
