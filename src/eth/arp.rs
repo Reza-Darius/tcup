@@ -14,7 +14,7 @@ use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MIN_SIZE};
 const ARP_PACKET_SIZE: usize = std::mem::size_of::<ArpMsg>();
 
 impl Packet<Arp> {
-    pub fn parse(eth: Packet<Eth>) -> Result<Self, EthErr> {
+    pub(super) fn parse(eth: Packet<Eth>) -> Result<Self, EthErr> {
         let data = eth.into_vec();
         let arp = ArpMsg::ref_from_prefix(&data[ETH_HDR_SIZE..])
             .map_err(|_| EthErr::ParseError("arp parse error"))?
@@ -31,13 +31,13 @@ impl Packet<Arp> {
             .0
     }
 
-    pub fn set_hdr(&mut self, hdr: ArpMsg) {
+    pub(super) fn set_hdr(&mut self, hdr: ArpMsg) {
         hdr.write_to_prefix(&mut self.as_slice_mut()[ETH_HDR_SIZE..])
             .expect("the packet is validated already")
     }
 
     /// allocates a new arp message
-    pub fn new(packet: ArpMsg) -> Self {
+    pub(super) fn new(packet: ArpMsg) -> Self {
         const PADDING: usize = ETH_PAY_MIN_SIZE - ARP_PACKET_SIZE;
         // we include padding to get to the required minimum ethernet size
         const SIZE: usize = ETH_HDR_SIZE + ARP_PACKET_SIZE + PADDING;
@@ -68,6 +68,8 @@ impl Packet<Arp> {
             .expect("the values are hard coded")
     }
 
+    /// runs the ARP packet reception algorithm according to RFC 826, returning a packet in case we
+    /// should send a reply
     pub fn run_arp_check(mut self, host: &mut impl ArpStore) -> Option<Packet<Eth>> {
         let mut arp_packet = self.hdr();
 
@@ -160,6 +162,7 @@ pub struct ArpMsg {
     pub dip: [u8; IP_ADDR_LEN],   // (ar$tpa) Protocol address of target
 }
 
+/// interface for an ARP store keyed by ip address
 pub trait ArpStore {
     /// if and only if smac and sip are in the store, update it the entry and return true
     fn update_if_present(&mut self, smac: Mac, sip: Ipv4Addr) -> bool;

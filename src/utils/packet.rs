@@ -12,7 +12,7 @@ pub struct Packet<P: PacketType> {
     l_type: PhantomData<P>,
 }
 
-impl<P: PacketType> NetworkPacket for Packet<P> {
+impl<P: PacketType> PacketBuf for Packet<P> {
     /// a slice to the entire packet buffer
     fn as_slice(&self) -> &[u8] {
         &self.data
@@ -53,7 +53,7 @@ impl<P: PacketType> AsRef<[u8]> for Packet<P> {
 }
 
 /// trait for a packet that can be sent on the network
-pub trait NetworkPacket {
+pub trait PacketBuf {
     fn as_slice(&self) -> &[u8];
     fn as_slice_mut(&mut self) -> &mut [u8];
     fn into_vec(self) -> Vec<u8>;
@@ -65,6 +65,30 @@ pub trait NetworkPacket {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+pub trait NetworkPacket
+where
+    Self: Sized,
+    Self::Error: std::error::Error,
+{
+    type Header;
+    type Payload;
+    type Error;
+
+    /// parses a buffer, returning the packet on success
+    fn parse(data: impl Into<Vec<u8>>) -> Result<Self, Self::Error>;
+
+    /// build a new packet
+    fn build(header: Self::Header, payload: Self::Payload) -> Self;
+
+    /// splits up a packet into a lower-level packet
+    ///
+    /// this will call [`NetworkPacket::parse()`] on the underlying packet
+    fn into_parts(self) -> Result<(Self::Header, Self::Payload), Self::Error>;
+
+    fn header(&self) -> &Self::Header;
+    fn payload(&self) -> &[u8];
 }
 
 /// marker trait for supported protocols

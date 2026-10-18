@@ -75,7 +75,7 @@ impl TAPDevice {
 
         let tap = open_tap(&name)?;
 
-        // set up tap device
+        // set up rtnetlink connection to give tap device an ip address
         let (con, handler, _) = new_connection()?;
         tokio::spawn(con);
 

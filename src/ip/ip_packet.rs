@@ -53,7 +53,7 @@ impl Packet<Ipv4> {
             return Err(ParseError("eth_pay is too small for IP header".into()));
         }
 
-        if get_hdr_ver(eth_pay[0]) != 4 {
+        if get_hdr_ver(eth_pay[0]) != libc::IPVERSION {
             return Err(ParseError("not supported IP version".into()));
         }
 

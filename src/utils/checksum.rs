@@ -1,18 +1,21 @@
 /// assumes network order bytes
 pub fn calc_checksum_be(bytes: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
+    let mut sum: u64 = 0;
     let mut i = 0;
 
+    // sum up 2 byte words
     while i + 1 < bytes.len() {
         let word = u16::from_be_bytes([bytes[i], bytes[i + 1]]);
-        sum += word as u32;
+        sum += word as u64;
         i += 2;
     }
 
+    // sum up leftover if any
     if i < bytes.len() {
-        sum += (bytes[i] as u32) << 8;
+        sum += (bytes[i] as u64) << 8;
     }
 
+    // fold up sum
     while (sum >> 16) > 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
