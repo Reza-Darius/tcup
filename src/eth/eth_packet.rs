@@ -39,8 +39,8 @@ impl EthProt {
     }
 }
 
-impl Packet<Eth> {
-    pub fn parse(data: impl Into<Vec<u8>>) -> Result<Packet<Eth>, EthErr> {
+impl Packet<ETH> {
+    pub fn parse(data: impl Into<Vec<u8>>) -> Result<Packet<ETH>, EthErr> {
         let data = data.into();
 
         if data.len() > ETH_FRAME_MAX_SIZE {
@@ -71,7 +71,7 @@ impl Packet<Eth> {
 
         let pay = match self.prot() {
             EthProt::Arp => EthPayload::Arp(Packet::<ARP>::parse(self)?),
-            EthProt::Ip => EthPayload::Ip(Packet::<Ipv4>::parse(self)?),
+            EthProt::Ip => EthPayload::Ip(Packet::<IP>::parse(self)?),
         };
 
         Ok((hdr, pay))
@@ -79,7 +79,7 @@ impl Packet<Eth> {
 
     pub fn prot(&self) -> EthProt {
         u16::from_be_bytes(
-            self.as_slice()[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2]
+            self.as_buf()[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2]
                 .try_into()
                 .expect("get eth prot: packet is parsed and has the required length"),
         )
@@ -88,16 +88,16 @@ impl Packet<Eth> {
     }
 
     /// construct a new frame, this reuses the payload allocation
-    pub fn new(dmac: impl Into<Mac>, smac: impl Into<Mac>, payload: EthPayload) -> Packet<Eth> {
+    pub fn new(dmac: impl Into<Mac>, smac: impl Into<Mac>, payload: EthPayload) -> Packet<ETH> {
         let prot;
         let mut data = match payload {
             EthPayload::Arp(packet) => {
                 prot = EthProt::Arp;
-                packet.into_vec()
+                packet.into_buf()
             }
             EthPayload::Ip(packet) => {
                 prot = EthProt::Ip;
-                packet.into_vec()
+                packet.into_buf()
             }
         };
 
@@ -119,20 +119,20 @@ impl Packet<Eth> {
     }
 
     pub fn hdr(&self) -> &EthHdr {
-        EthHdr::ref_from_prefix(self.as_slice())
+        EthHdr::ref_from_prefix(self.as_buf())
             .expect("a parsed frame has sufficient len")
             .0
     }
 
     pub fn payload(&self) -> &[u8] {
-        &self.as_slice()[ETH_PAY_OFFSET..]
+        &self.as_buf()[ETH_PAY_OFFSET..]
     }
 }
 
 #[derive(Debug)]
 pub enum EthPayload {
     Arp(Packet<ARP>),
-    Ip(Packet<Ipv4>),
+    Ip(Packet<IP>),
 }
 
 impl From<Packet<ARP>> for EthPayload {
@@ -141,8 +141,8 @@ impl From<Packet<ARP>> for EthPayload {
     }
 }
 
-impl From<Packet<Ipv4>> for EthPayload {
-    fn from(value: Packet<Ipv4>) -> Self {
+impl From<Packet<IP>> for EthPayload {
+    fn from(value: Packet<IP>) -> Self {
         EthPayload::Ip(value)
     }
 }
@@ -209,7 +209,7 @@ mod tests {
             Ipv4Addr::new(10, 0, 0, 2),
             Ipv4Addr::new(10, 0, 0, 1),
         )
-        .into_vec()
+        .into_buf()
     }
 
     fn dummy_arp_msg() -> ArpMsg {
@@ -251,14 +251,14 @@ mod tests {
     #[test]
     fn parse_rejects_data_over_mtu() {
         let data = vec![0u8; ETH_FRAME_MAX_SIZE + 1];
-        let result = Packet::<Eth>::parse(data);
+        let result = Packet::<ETH>::parse(data);
         assert!(matches!(result, Err(EthErr::ParseError(_))));
     }
 
     #[test]
     fn parse_rejects_data_below_header_size() {
         let data = vec![0u8; ETH_HDR_SIZE - 1];
-        let result = Packet::<Eth>::parse(data);
+        let result = Packet::<ETH>::parse(data);
         assert!(matches!(result, Err(EthErr::ParseError(_))));
     }
 
@@ -271,21 +271,21 @@ mod tests {
         // bogus ethertype
         data[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2].copy_from_slice(&0xFFFFu16.to_be_bytes());
 
-        let result = Packet::<Eth>::parse(data);
+        let result = Packet::<ETH>::parse(data);
         assert!(matches!(result, Err(EthErr::InvalidProtError)));
     }
 
     #[test]
     fn parse_accepts_valid_arp_frame() {
         let data = valid_arp_eth_bytes();
-        let packet = Packet::<Eth>::parse(data).expect("valid arp frame should parse");
+        let packet = Packet::<ETH>::parse(data).expect("valid arp frame should parse");
         assert_eq!(packet.prot(), EthProt::Arp);
     }
 
     #[test]
     fn parse_roundtrips_header_fields() {
         let data = valid_arp_eth_bytes();
-        let packet = Packet::<Eth>::parse(data).expect("should parse");
+        let packet = Packet::<ETH>::parse(data).expect("should parse");
         let hdr = packet.hdr();
         assert_eq!(hdr.dmac, Mac::BROADCAST.octets());
         assert_eq!(hdr.smac, SMAC);
@@ -295,7 +295,7 @@ mod tests {
     fn new_writes_requested_macs_and_prot_into_header() {
         let payload = EthPayload::Arp(Packet::<ARP>::new(dummy_arp_msg()));
 
-        let eth = Packet::<Eth>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), payload);
+        let eth = Packet::<ETH>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), payload);
 
         assert_eq!(eth.hdr().dmac, DMAC);
         assert_eq!(eth.hdr().smac, SMAC);
@@ -308,14 +308,14 @@ mod tests {
         // Bypass the normal Arp constructors (which always produce a
         // small, MTU-safe frame) to exercise the size guard directly.
         let oversized = EthPayload::Arp(Packet::<ARP>::from_vec(vec![0u8; ETH_FRAME_MAX_SIZE + 1]));
-        Packet::<Eth>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), oversized);
+        Packet::<ETH>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), oversized);
     }
 
     // --- into_parts ---
 
     #[test]
     fn into_parts_routes_arp_frames_to_arp_variant() {
-        let packet = Packet::<Eth>::parse(valid_arp_eth_bytes()).expect("should parse");
+        let packet = Packet::<ETH>::parse(valid_arp_eth_bytes()).expect("should parse");
         let (hdr, payload) = packet.into_parts().expect("should split");
         assert_eq!(hdr.prot_type.get(), libc::ETH_P_ARP as u16);
         assert!(matches!(payload, EthPayload::Arp(_)));

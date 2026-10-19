@@ -14,21 +14,25 @@ pub struct Packet<P: PacketType> {
 
 impl<P: PacketType> PacketBuf for Packet<P> {
     /// a slice to the entire packet buffer
-    fn as_slice(&self) -> &[u8] {
+    #[inline(always)]
+    fn as_buf(&self) -> &[u8] {
         &self.data
     }
 
     /// a slice to the entire packet buffer
-    fn as_slice_mut(&mut self) -> &mut [u8] {
+    #[inline(always)]
+    fn as_buf_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
 
     /// unwrap the packet to the underlying buffer
-    fn into_vec(self) -> Vec<u8> {
+    #[inline(always)]
+    fn into_buf(self) -> Vec<u8> {
         self.data
     }
 
     /// unsafe conversion, reserved parsing functions
+    #[inline(always)]
     fn from_vec(data: Vec<u8>) -> Self {
         Packet {
             data,
@@ -54,20 +58,20 @@ impl<P: PacketType> AsRef<[u8]> for Packet<P> {
 
 /// trait for a packet that can be sent on the network
 pub trait PacketBuf {
-    fn as_slice(&self) -> &[u8];
-    fn as_slice_mut(&mut self) -> &mut [u8];
-    fn into_vec(self) -> Vec<u8>;
+    fn as_buf(&self) -> &[u8];
+    fn as_buf_mut(&mut self) -> &mut [u8];
+    fn into_buf(self) -> Vec<u8>;
     fn from_vec(data: Vec<u8>) -> Self;
 
     fn len(&self) -> usize {
-        self.as_slice().len()
+        self.as_buf().len()
     }
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
 
-pub trait NetworkPacket
+pub trait NetworkPacket<Packet>
 where
     Self: Sized,
     Self::Error: std::error::Error,
@@ -77,7 +81,7 @@ where
     type Error;
 
     /// parses a buffer, returning the packet on success
-    fn parse(data: impl Into<Vec<u8>>) -> Result<Self, Self::Error>;
+    fn parse(data: Packet) -> Result<Self, Self::Error>;
 
     /// build a new packet
     fn build(header: Self::Header, payload: Self::Payload) -> Self;
@@ -95,16 +99,16 @@ where
 pub trait PacketType {}
 
 #[derive(Debug, Clone, Copy)]
-pub struct Eth;
-impl PacketType for Eth {}
+pub struct ETH;
+impl PacketType for ETH {}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ARP;
 impl PacketType for ARP {}
 
 #[derive(Debug, Clone, Copy)]
-pub struct Ipv4;
-impl PacketType for Ipv4 {}
+pub struct IP;
+impl PacketType for IP {}
 
 #[derive(Debug, Clone, Copy)]
 pub struct TCP;

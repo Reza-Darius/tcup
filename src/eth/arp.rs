@@ -14,8 +14,8 @@ use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MIN_SIZE};
 const ARP_PACKET_SIZE: usize = std::mem::size_of::<ArpMsg>();
 
 impl Packet<ARP> {
-    pub(super) fn parse(eth: Packet<Eth>) -> Result<Self, EthErr> {
-        let data = eth.into_vec();
+    pub(super) fn parse(eth: Packet<ETH>) -> Result<Self, EthErr> {
+        let data = eth.into_buf();
         let arp = ArpMsg::ref_from_prefix(&data[ETH_HDR_SIZE..])
             .map_err(|_| EthErr::ParseError("arp parse error"))?
             .0;
@@ -26,13 +26,13 @@ impl Packet<ARP> {
     }
 
     pub fn hdr(&self) -> ArpMsg {
-        ArpMsg::read_from_prefix(&self.as_slice()[ETH_HDR_SIZE..])
+        ArpMsg::read_from_prefix(&self.as_buf()[ETH_HDR_SIZE..])
             .expect("the packet is validated already")
             .0
     }
 
     pub(super) fn set_hdr(&mut self, hdr: ArpMsg) {
-        hdr.write_to_prefix(&mut self.as_slice_mut()[ETH_HDR_SIZE..])
+        hdr.write_to_prefix(&mut self.as_buf_mut()[ETH_HDR_SIZE..])
             .expect("the packet is validated already")
     }
 
@@ -51,7 +51,7 @@ impl Packet<ARP> {
         v.into()
     }
 
-    pub fn new_request(smac: Mac, sip: Ipv4Addr, target_ip: Ipv4Addr) -> Packet<Eth> {
+    pub fn new_request(smac: Mac, sip: Ipv4Addr, target_ip: Ipv4Addr) -> Packet<ETH> {
         let arp = ArpMsg {
             hwtype: libc::ARPHRD_ETHER.into(),
             prot_type: (libc::ETH_P_IP as u16).into(),
@@ -64,12 +64,12 @@ impl Packet<ARP> {
             dip: target_ip.octets(),
         };
 
-        Packet::<Eth>::new(Mac::BROADCAST, smac, Packet::<ARP>::new(arp).into())
+        Packet::<ETH>::new(Mac::BROADCAST, smac, Packet::<ARP>::new(arp).into())
     }
 
     /// runs the ARP packet reception algorithm according to RFC 826, returning a packet in case we
     /// should send a reply
-    pub fn run_arp_check(mut self, host: &mut impl ArpStore) -> Option<Packet<Eth>> {
+    pub fn run_arp_check(mut self, host: &mut impl ArpStore) -> Option<Packet<ETH>> {
         let mut arp_packet = self.hdr();
 
         let sender_mac = Mac::from_octets(arp_packet.smac);
@@ -135,7 +135,7 @@ impl Packet<ARP> {
 
             self.set_hdr(arp_packet);
 
-            return Some(Packet::<Eth>::new(sender_mac, host_mac, self.into()));
+            return Some(Packet::<ETH>::new(sender_mac, host_mac, self.into()));
         }
         None
     }
@@ -166,7 +166,7 @@ pub trait ArpStore {
     /// insert smac and sip as a new entry
     fn insert(&mut self, smac: Mac, sip: Ipv4Addr);
 
-    /// fetch the hosts link and network address
+    /// fetch the interface's link and network address
     fn addr(&self) -> (Mac, Ipv4Addr);
 }
 

@@ -44,9 +44,9 @@ pub enum Ipv4Prot {
     Tcp = libc::IPPROTO_TCP as u8,
 }
 
-impl Packet<Ipv4> {
-    pub fn parse(pck: Packet<Eth>) -> Result<Self, IpErr> {
-        let packet = pck.into_vec();
+impl Packet<IP> {
+    pub fn parse(pck: Packet<ETH>) -> Result<Self, IpErr> {
+        let packet = pck.into_buf();
         let eth_pay = &packet.as_bytes()[IP_HDR_OFFSET..];
         let hdr_size = get_hdr_len(eth_pay[0]);
 
@@ -99,27 +99,29 @@ impl Packet<Ipv4> {
 
     pub fn into_parts(self) -> Result<(IPv4Hdr, Ipv4Payload), IpErr> {
         let hdr = self.hdr().clone();
-        todo!()
-        // match self.prot() {
-        //     Ipv4Prot::Icmp => Packet::<Icmp>::parse(),
-        //     Ipv4Prot::Tcp => todo!(),
-        // }
+        match self.prot() {
+            Ipv4Prot::Icmp => { 
+                let packet = Packet::<ICMP>::parse(self)?;
+                Ok((hdr, packet.into()))
+            },
+            Ipv4Prot::Tcp => todo!(),
+        }
     }
 
     pub fn new(
         src_addr: Ipv4Addr,
         dest_addr: Ipv4Addr,
         paylod: Ipv4Payload,
-    ) -> Result<Packet<Ipv4>, IpErr> {
+    ) -> Result<Packet<IP>, IpErr> {
         let prot;
         let mut data = match paylod {
             Ipv4Payload::Tcp(packet) => {
                 prot = Ipv4Prot::Tcp;
-                packet.into_vec()
+                packet.into_buf()
             }
             Ipv4Payload::Icmp(packet) => {
                 prot = Ipv4Prot::Icmp;
-                packet.into_vec()
+                packet.into_buf()
             }
         };
 
@@ -133,7 +135,7 @@ impl Packet<Ipv4> {
             .write_to_prefix(&mut data[IP_HDR_OFFSET..])
             .expect("there should be enough space");
 
-        let mut packet: Packet<Ipv4> = data.into();
+        let mut packet: Packet<IP> = data.into();
         packet.set_checksum();
 
         Ok(packet)
@@ -141,22 +143,22 @@ impl Packet<Ipv4> {
 
     #[inline(always)]
     pub fn prot(&self) -> Ipv4Prot {
-        self.as_slice()[IP_CHECK_OFFSET]
+        self.as_buf()[IP_CHECK_OFFSET]
             .try_into()
             .expect("the packet is parsed")
     }
 
     /// convenience function
     #[inline(always)]
-    pub fn to_eth(self, dmac: impl Into<Mac>, smac: impl Into<Mac>) -> Packet<Eth> {
-        Packet::<Eth>::new(dmac, smac, self.into())
+    pub fn to_eth(self, dmac: impl Into<Mac>, smac: impl Into<Mac>) -> Packet<ETH> {
+        Packet::<ETH>::new(dmac, smac, self.into())
     }
 
     /// reads the header length of the ip packet: 20 byte + options
     #[inline(always)]
     pub fn hdr_len(&self) -> u8 {
         // the len field is in the first byte
-        let res = get_hdr_len(self.as_slice()[IP_HDR_OFFSET]);
+        let res = get_hdr_len(self.as_buf()[IP_HDR_OFFSET]);
         debug_assert!(
             (IP_HDR_MINSIZE..=IP_HDR_MAXSIZE).contains(&res),
             "illegal size"
@@ -166,9 +168,18 @@ impl Packet<Ipv4> {
 
     #[inline(always)]
     pub fn hdr(&self) -> &IPv4Hdr {
-        IPv4Hdr::ref_from_prefix(&self.as_slice()[IP_HDR_OFFSET..])
+        IPv4Hdr::ref_from_prefix(&self.as_buf()[IP_HDR_OFFSET..])
             .expect("get ip hdr: the packet is parsed")
             .0
+    }
+
+    /// ip payload
+    #[inline(always)]
+    pub fn payload(&self) -> &[u8] {
+        let hdr_len = self.hdr_len();
+        let pay_len = self.hdr().tot_len.get() - self.hdr_len() as u16;
+
+        &self.as_buf()[IP_HDR_OFFSET + hdr_len as usize..IP_HDR_OFFSET + hdr_len as usize]
     }
 
     #[inline(always)]
@@ -178,19 +189,19 @@ impl Packet<Ipv4> {
         let offset = IP_CHECK_OFFSET;
 
         // setting to 0 before calculation
-        self.as_slice_mut()[offset] = 0;
-        self.as_slice_mut()[offset + 1] = 0;
+        self.as_buf_mut()[offset] = 0;
+        self.as_buf_mut()[offset + 1] = 0;
 
         let check = calc_checksum_be(
-            &self.as_slice()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len() as usize],
+            &self.as_buf()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len() as usize],
         );
-        (&mut self.as_slice_mut()[offset..]).put_u16(check);
+        (&mut self.as_buf_mut()[offset..]).put_u16(check);
         // self.data[offset..offset + size_of::<u16>()].copy_from_slice(&u16::to_be_bytes(check));
 
         debug_assert_eq!(
             0,
             calc_checksum_be(
-                &self.as_slice()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len() as usize]
+                &self.as_buf()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len() as usize]
             ),
             "set checksum failed"
         );
@@ -278,6 +289,13 @@ impl IPv4Hdr {
     pub fn len(&self) -> u8 {
         get_hdr_len(self.ver_ihl)
     }
+
+    /// retrieves the total size of the IP header in bytes
+    #[inline(always)]
+    pub fn tot_len(&self) -> u16 {
+        self.tot_len.get()
+    }
+
 
     #[inline(always)]
     pub fn version(&self) -> u8 {

@@ -3,7 +3,7 @@
 use crate::{
     eth::{ETH_FRAME_MAX_SIZE, Mac},
     tap::TapError::UdevError,
-    utils::packet::{Eth, Packet},
+    utils::packet::{ETH, Packet},
 };
 
 use std::{
@@ -290,21 +290,24 @@ pin_project_lite::pin_project! {
 }
 
 impl Stream for TAPStream {
-    type Item = io::Result<Packet<Eth>>;
+    type Item = io::Result<Packet<ETH>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
         let mut read_buf = ReadBuf::uninit(this.buf);
-        let _ = ready!(this.tap.poll_read(cx, &mut read_buf));
+
+        if let Err(e) = ready!(this.tap.poll_read(cx, &mut read_buf)) {
+            return Poll::Ready(Some(Err(e)));
+        };
 
         trace!("read {} bytes in stream", read_buf.filled().len());
 
-        match Packet::<Eth>::parse(read_buf.filled()) {
+        match Packet::<ETH>::parse(read_buf.filled()) {
             Ok(packet) => Poll::Ready(Some(Ok(packet))),
             Err(e) => {
                 trace!(%e, "failed to parse frame");
-                Poll::Ready(None)
+                Poll::Ready(Some(Err(io::Error::new(io::ErrorKind::InvalidData, e))))
             }
         }
     }
@@ -319,10 +322,9 @@ impl AsyncRead for TAPDevice {
         loop {
             let mut guard = ready!(self.fd.poll_read_ready(cx))?;
 
-            let unfilled = buf.initialize_unfilled();
-            match guard
-                .try_io(|inner| rustix::io::read(inner.get_ref(), unfilled).map_err(Into::into))
-            {
+            match guard.try_io(|inner| {
+                rustix::io::read(inner.get_ref(), buf.initialize_unfilled()).map_err(Into::into)
+            }) {
                 Ok(Ok(len)) => {
                     buf.advance(len);
                     return Poll::Ready(Ok(()));
@@ -353,13 +355,11 @@ impl AsyncWrite for TAPDevice {
 
     #[inline(always)]
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // tcp flush is a no-op
         Poll::Ready(Ok(()))
     }
 
     #[inline(always)]
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // its a tap device, there is no thing to shut down
         Poll::Ready(Ok(()))
     }
 }
