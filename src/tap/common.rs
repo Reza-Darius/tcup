@@ -2,8 +2,8 @@
 
 use crate::{
     eth::{ETH_FRAME_MAX_SIZE, Mac},
-    tap::TapError::UdevError,
-    utils::packet::{ETH, Packet},
+    tap::common::TapError::UdevError,
+    utils::packet::{ETH, Packet, PacketBuf},
 };
 
 use std::{
@@ -21,9 +21,10 @@ use futures::{Stream, TryStreamExt};
 use rtnetlink::{Handle, LinkUnspec, new_connection};
 use rustix::fs::{Mode, OFlags};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, unix::AsyncFd};
 use tracing::{instrument, trace};
 use udev::MonitorSocket;
+
 
 /// linux tap device which can receive ethernet frames
 ///
@@ -109,25 +110,43 @@ impl TAPDevice {
     }
 
     #[inline(always)]
+    pub async fn send_frames(&mut self, packets: &[Packet<ETH>]) -> Result<(), TapError> {
+        for packet in packets {
+            self.send_frame(packet).await?;
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub async fn send_frame(&mut self, packet: &Packet<ETH>) -> Result<(), TapError> {
+        self.write_all(packet.as_buf()).await.map_err(Into::into)
+    }
+
+    /// retrieves the TAP device's link address
+    #[inline(always)]
     pub fn mac(&self) -> Mac {
         self.mac
     }
 
+    /// retrieves the TAP device's name
     #[inline(always)]
     pub fn dev_name(&self) -> &str {
         &self.name
     }
 
+    /// retrieves the TAP device's ip address if one is configured
     #[inline(always)]
     pub fn addr(&self) -> Option<IpAddr> {
         self.addr.map(|(addr, _)| addr)
     }
 
+    /// retrieves the TAP device's subnet if one is configured
     #[inline(always)]
     pub fn subnet(&self) -> Option<u8> {
         self.addr.map(|(_, sub)| sub)
     }
 
+    /// turns the TAP device into a type that can read ETH frames
     pub fn into_stream(self) -> TAPStream {
         TAPStream {
             buf: Box::new_uninit_slice(ETH_FRAME_MAX_SIZE),
@@ -286,6 +305,23 @@ pin_project_lite::pin_project! {
         buf: Box<[MaybeUninit<u8>]>,
         #[pin]
         tap: TAPDevice,
+    }
+}
+
+impl TAPStream {
+    pub async fn send_frames(&mut self, packets: &[Packet<ETH>]) -> Result<(), TapError> {
+        for packet in packets {
+            self.tap.send_frame(packet).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn send_frame(&mut self, packet: &Packet<ETH>) -> Result<(), TapError> {
+        let buf = packet.as_buf();
+        self.tap
+            .write_all(packet.as_buf())
+            .await
+            .map_err(Into::into)
     }
 }
 

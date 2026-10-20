@@ -56,7 +56,7 @@ impl<P: PacketType> AsRef<[u8]> for Packet<P> {
     }
 }
 
-/// trait for a packet that can be sent on the network
+/// trait for the underlying buffer of a packet
 pub trait PacketBuf {
     fn as_buf(&self) -> &[u8];
     fn as_buf_mut(&mut self) -> &mut [u8];
@@ -88,10 +88,10 @@ where
 
     /// splits up a packet into a lower-level packet
     ///
-    /// this will call [`NetworkPacket::parse()`] on the underlying packet
+    /// this fucntion will generally call [`NetworkPacket::parse()`] on the underlying packet
     fn into_parts(self) -> Result<(Self::Header, Self::Payload), Self::Error>;
 
-    fn header(&self) -> &Self::Header;
+    fn hdr(&self) -> &Self::Header;
     fn payload(&self) -> &[u8];
 }
 

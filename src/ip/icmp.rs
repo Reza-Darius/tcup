@@ -3,7 +3,7 @@
 use std::net::Ipv4Addr;
 
 use num_enum::TryFromPrimitive;
-use tracing::{debug, info, trace};
+use tracing::{debug, trace};
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
 use crate::eth::ETH_HDR_SIZE;
@@ -45,11 +45,8 @@ impl Packet<ICMP> {
         Ok(Packet::<ICMP>::from_vec(data.into_buf()))
     }
 
-    pub fn service(self) -> Option<Packet<IP>> {
-        // ugh this is ugly
-        let sip = Ipv4Addr::from(*self.as_buf()[26..30].as_array().unwrap());
-        let dip = Ipv4Addr::from(*self.as_buf()[30..34].as_array().unwrap());
-
+    /// service the incoming ICMP packet
+    pub fn service(self, sip: Ipv4Addr, dip: Ipv4Addr) -> Option<Packet<IP>> {
         let icmp_slice = &self.as_buf()[IP_HDR_MINSIZE as usize + ETH_HDR_SIZE..];
 
         match ICMPProt::try_from(icmp_slice[0]).ok()? {
@@ -58,7 +55,7 @@ impl Packet<ICMP> {
                 Packet::<IP>::new(dip, sip, reply.into()).ok()
             }
             ICMPProt::EchoReply => {
-                info!("got an echo reply!");
+                debug!("got an echo reply!");
                 None
             }
             _ => {

@@ -67,9 +67,9 @@ impl Packet<ARP> {
         Packet::<ETH>::new(Mac::BROADCAST, smac, Packet::<ARP>::new(arp).into())
     }
 
-    /// runs the ARP packet reception algorithm according to RFC 826, returning a packet in case we
+    /// runs the incoming ARP packet reception algorithm according to RFC 826, returning a packet in case we
     /// should send a reply
-    pub fn run_arp_check(mut self, host: &mut impl ArpStore) -> Option<Packet<ETH>> {
+    pub fn service(mut self, host: &mut impl ARPTable) -> Option<Packet<ETH>> {
         let mut arp_packet = self.hdr();
 
         let sender_mac = Mac::from_octets(arp_packet.smac);
@@ -159,7 +159,7 @@ pub struct ArpMsg {
 }
 
 /// interface for an ARP store keyed by ip address
-pub trait ArpStore {
+pub trait ARPTable {
     /// if and only if smac and sip are in the store, update it the entry and return true
     fn update_if_present(&mut self, smac: Mac, sip: Ipv4Addr) -> bool;
 
@@ -255,7 +255,7 @@ mod tests {
         }
     }
 
-    impl ArpStore for MockStore {
+    impl ARPTable for MockStore {
         fn update_if_present(&mut self, smac: Mac, sip: Ipv4Addr) -> bool {
             self.update_calls.borrow_mut().push((smac, sip));
             self.known.iter().any(|(_, ip)| *ip == sip)
@@ -275,9 +275,7 @@ mod tests {
         let packet = Packet::<ARP>::new(base_request(HOST_IP));
         let mut store = MockStore::default();
 
-        let reply_eth = packet
-            .run_arp_check(&mut store)
-            .expect("expected a reply packet");
+        let reply_eth = packet.service(&mut store).expect("expected a reply packet");
 
         let reply_arp =
             Packet::<ARP>::parse(reply_eth).expect("reply should be a valid parseable ARP packet");
@@ -295,7 +293,7 @@ mod tests {
         let packet = Packet::<ARP>::new(base_request(OTHER_IP));
         let mut store = MockStore::default();
 
-        let result = packet.run_arp_check(&mut store);
+        let result = packet.service(&mut store);
         assert!(result.is_none());
     }
 
@@ -304,7 +302,7 @@ mod tests {
         let packet = Packet::<ARP>::new(base_reply(HOST_IP));
         let mut store = MockStore::default();
 
-        let result = packet.run_arp_check(&mut store);
+        let result = packet.service(&mut store);
         assert!(result.is_none());
         assert_eq!(store.insert_calls.borrow().len(), 1);
     }
@@ -316,7 +314,7 @@ mod tests {
         let packet = Packet::<ARP>::new(msg);
         let mut store = MockStore::default();
 
-        assert!(packet.run_arp_check(&mut store).is_none());
+        assert!(packet.service(&mut store).is_none());
         assert!(store.update_calls.borrow().is_empty());
         assert!(store.insert_calls.borrow().is_empty());
     }
@@ -328,7 +326,7 @@ mod tests {
         let packet = Packet::<ARP>::new(msg);
         let mut store = MockStore::default();
 
-        assert!(packet.run_arp_check(&mut store).is_none());
+        assert!(packet.service(&mut store).is_none());
         assert!(store.update_calls.borrow().is_empty());
         assert!(store.insert_calls.borrow().is_empty());
     }
@@ -338,7 +336,7 @@ mod tests {
         let packet = Packet::<ARP>::new(base_request(HOST_IP));
         let mut store = MockStore::with_known(SENDER_MAC, SENDER_IP);
 
-        let _ = packet.run_arp_check(&mut store);
+        let _ = packet.service(&mut store);
 
         assert_eq!(store.update_calls.borrow().len(), 1);
         assert!(store.insert_calls.borrow().is_empty());
@@ -349,7 +347,7 @@ mod tests {
         let packet = Packet::<ARP>::new(base_request(HOST_IP));
         let mut store = MockStore::default();
 
-        let _ = packet.run_arp_check(&mut store);
+        let _ = packet.service(&mut store);
 
         assert_eq!(store.update_calls.borrow().len(), 1);
         assert_eq!(store.insert_calls.borrow().len(), 1);

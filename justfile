@@ -8,3 +8,12 @@ test_tap:
 
 set_cap bin:
     sudo setcap {{ CAP }} {{ DEBUG_DIR }}{{ bin }}
+
+run: build cap
+    cargo run
+
+build:
+    cargo build
+
+cap:
+    sudo setcap {{ CAP }} {{ DEBUG_DIR }}{{ CRATE }}

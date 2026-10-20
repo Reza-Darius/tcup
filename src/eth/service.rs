@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::Ipv4Addr};
 use tracing::trace;
 
 use crate::{
-    eth::{ArpStore, Mac},
+    eth::{ARPTable, Mac},
     utils::packet::{ARP, ETH, Packet},
 };
 
@@ -12,7 +12,7 @@ struct ARPStore {
     if_addr: (Mac, Ipv4Addr),
 }
 
-impl ArpStore for ARPStore {
+impl ARPTable for ARPStore {
     fn update_if_present(&mut self, smac: Mac, sip: Ipv4Addr) -> bool {
         match self.map.entry(sip) {
             std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
@@ -47,7 +47,15 @@ impl ARPService {
         }
     }
 
+    pub fn get_mac(&self, target_ip: Ipv4Addr) -> Option<Mac> {
+        self.store.map.get(&target_ip).copied()
+    }
+
+    pub fn request_mac(&self, target_ip: Ipv4Addr) -> Packet<ETH> {
+        Packet::<ARP>::new_request(self.store.if_addr.0, self.store.if_addr.1, target_ip)
+    }
+
     pub fn handle_packet(&mut self, packet: Packet<ARP>) -> Option<Packet<ETH>> {
-        packet.run_arp_check(&mut self.store)
+        packet.service(&mut self.store)
     }
 }

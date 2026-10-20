@@ -16,8 +16,8 @@ use crate::{
 pub const IP_HDR_MINSIZE: u8 = 20;
 pub const IP_HDR_MAXSIZE: u8 = 60;
 pub const IP_ADDR_LEN: u8 = 4;
-pub const TOS_BEST_EFFORT: u8 = 0;
 
+pub const TOS_BEST_EFFORT: u8 = 0;
 pub const TTL_START: u8 = 64;
 
 pub const IPPROTO_ICMP: u8 = libc::IPPROTO_ICMP as u8;
@@ -100,10 +100,10 @@ impl Packet<IP> {
     pub fn into_parts(self) -> Result<(IPv4Hdr, Ipv4Payload), IpErr> {
         let hdr = self.hdr().clone();
         match self.prot() {
-            Ipv4Prot::Icmp => { 
+            Ipv4Prot::Icmp => {
                 let packet = Packet::<ICMP>::parse(self)?;
                 Ok((hdr, packet.into()))
-            },
+            }
             Ipv4Prot::Tcp => todo!(),
         }
     }
@@ -192,17 +192,14 @@ impl Packet<IP> {
         self.as_buf_mut()[offset] = 0;
         self.as_buf_mut()[offset + 1] = 0;
 
-        let check = calc_checksum_be(
-            &self.as_buf()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len() as usize],
-        );
+        let check =
+            calc_checksum_be(&self.as_buf()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len() as usize]);
         (&mut self.as_buf_mut()[offset..]).put_u16(check);
         // self.data[offset..offset + size_of::<u16>()].copy_from_slice(&u16::to_be_bytes(check));
 
         debug_assert_eq!(
             0,
-            calc_checksum_be(
-                &self.as_buf()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len() as usize]
-            ),
+            calc_checksum_be(&self.as_buf()[ETH_HDR_SIZE..ETH_HDR_SIZE + self.hdr_len() as usize]),
             "set checksum failed"
         );
     }
@@ -296,7 +293,6 @@ impl IPv4Hdr {
         self.tot_len.get()
     }
 
-
     #[inline(always)]
     pub fn version(&self) -> u8 {
         get_hdr_ver(self.ver_ihl)
@@ -333,27 +329,14 @@ impl std::fmt::Display for IPv4Hdr {
 
         writeln!(
             f,
-            "sip: {src},
-            dest: {dest},
-            ver: {ver},
-            len: {len},
-            tot_len: {tot},
-            ttl: {ttl},
-            prot {prot},
+            "sip: {src}, \
+            dest: {dest}, \
+            ver: {ver}, \
+            len: {len}, \
+            tot_len: {tot}, \
+            ttl: {ttl}, \
+            prot {prot}, \
             check: {check}"
         )
     }
 }
-
-// pub async fn handle_ip_frame(inc: EthPacket, tcup: TCup) -> Result<()> {
-//     let eth_pay = inc.payload();
-//     let ip_hdr = check_ip_packet(eth_pay)?;
-//
-//     debug!("handling IP packet\n{}", ip_hdr);
-//
-//     match ip_hdr.prot {
-//         IPPROTO_ICMP => handle_icmp(inc, tcup).await,
-//         IPPROTO_TCP => handle_tcp(inc, tcup).await,
-//         _ => Err("IP protocol not supported".into()),
-//     }
-// }
