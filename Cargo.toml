@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "server"
+name = "tcup"
 path = "src/bin/server.rs"
 
 [[bin]]

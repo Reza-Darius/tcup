@@ -30,12 +30,12 @@ pub const FRAG_OFFSET_MASK: u16 = 0x1FFF;
 
 /// start of the IP header
 const IP_HDR_OFFSET: usize = ETH_HDR_SIZE;
-/// offset for checkmark byte
-const IP_CHECK_OFFSET: usize = ETH_HDR_SIZE + 10;
+/// offset for checksum field
+const IP_CHECK_OFFSET: usize = IP_HDR_OFFSET + 10;
 /// offset for protocol byte
-const IP_PROT_OFFSET: usize = ETH_HDR_SIZE + 10;
+const IP_PROT_OFFSET: usize = IP_HDR_OFFSET + 9;
 /// payloard offset without options
-const IP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE as usize;
+const IP_PAY_OFFSET: usize = IP_HDR_OFFSET + IP_HDR_MINSIZE as usize;
 
 #[derive(TryFromPrimitive, PartialEq, Clone, Copy, Debug)]
 #[repr(u8)]
@@ -60,7 +60,7 @@ impl Packet<IP> {
         }
 
         if get_hdr_ver(eth_pay[0]) != libc::IPVERSION {
-            return Err(ParseError("not supported IP version".into()));
+            return Err(ParseError("unsupported IP version".into()));
         }
 
         if hdr_size as usize > eth_pay.len() {
@@ -81,6 +81,9 @@ impl Packet<IP> {
         let hdr = IPv4Hdr::read_from_prefix(eth_pay)
             .map_err(|e| ParseError(format!("couldnt extract header: {e}")))?
             .0;
+
+        Ipv4Prot::try_from(hdr.prot)
+            .map_err(|e| ParseError(format!("unsupported IP payload, ver: {}", hdr.prot)))?;
 
         if !hdr.is_fragmented() {
             return Err(ParseError("fragmentation is not supported".into()));
@@ -114,7 +117,7 @@ impl Packet<IP> {
         paylod: Ipv4Payload,
     ) -> Result<Packet<IP>, IpErr> {
         let prot;
-        let mut data = match paylod {
+        let mut buf = match paylod {
             Ipv4Payload::Tcp(packet) => {
                 prot = Ipv4Prot::Tcp;
                 packet.into_buf()
@@ -125,17 +128,17 @@ impl Packet<IP> {
             }
         };
 
-        if data.len() < IP_PAY_OFFSET + IP_HDR_MINSIZE as usize {
+        if buf.len() < IP_PAY_OFFSET + IP_HDR_MINSIZE as usize {
             return Err(BuildError(
                 "invalid size: data len is lower than required".to_string(),
             ));
         }
 
-        IPv4Hdr::new(src_addr, dest_addr, prot, &data)
-            .write_to_prefix(&mut data[IP_HDR_OFFSET..])
+        IPv4Hdr::new(src_addr, dest_addr, prot, &buf[IP_HDR_MINSIZE as usize + ETH_HDR_SIZE..])
+            .write_to_prefix(&mut buf[IP_HDR_OFFSET..])
             .expect("there should be enough space");
 
-        let mut packet: Packet<IP> = data.into();
+        let mut packet: Packet<IP> = buf.into();
         packet.set_checksum();
 
         Ok(packet)
@@ -143,7 +146,7 @@ impl Packet<IP> {
 
     #[inline(always)]
     pub fn prot(&self) -> Ipv4Prot {
-        self.as_buf()[IP_CHECK_OFFSET]
+        self.as_buf()[IP_PROT_OFFSET]
             .try_into()
             .expect("the packet is parsed")
     }
@@ -176,10 +179,10 @@ impl Packet<IP> {
     /// ip payload
     #[inline(always)]
     pub fn payload(&self) -> &[u8] {
-        let hdr_len = self.hdr_len();
+        let hdr_len = self.hdr_len() as usize;
         let pay_len = self.hdr().tot_len.get() - self.hdr_len() as u16;
 
-        &self.as_buf()[IP_HDR_OFFSET + hdr_len as usize..IP_HDR_OFFSET + hdr_len as usize]
+        &self.as_buf()[IP_HDR_OFFSET + hdr_len..IP_HDR_OFFSET + hdr_len + pay_len as usize]
     }
 
     #[inline(always)]
@@ -249,9 +252,9 @@ pub struct IPv4Hdr {
 impl IPv4Hdr {
     pub fn new(src_addr: Ipv4Addr, dest_addr: Ipv4Addr, prot: Ipv4Prot, payload: &[u8]) -> IPv4Hdr {
         let mut hdr = IPv4Hdr {
-            ver_ihl: 4 << 4,
+            ver_ihl: 0,
             tos: TOS_BEST_EFFORT,
-            tot_len: 0.into(),
+            tot_len: (IP_HDR_MINSIZE as u16 + payload.len() as u16).into(),
             id: 0.into(),
             frag_off: IP_DF.into(),
             ttl: TTL_START,
@@ -263,10 +266,22 @@ impl IPv4Hdr {
 
         debug_assert!(payload.len() <= u16::MAX as usize);
 
-        hdr.set_ihl(4, payload.len() as u16 + IP_HDR_MINSIZE as u16);
+        hdr.set_ihl(4, IP_HDR_MINSIZE as u16);
         hdr.checksum = calc_checksum_be(payload).into();
 
         hdr
+    }
+
+    /// source address
+    #[inline(always)]
+    pub fn sip(&self) -> Ipv4Addr {
+        Ipv4Addr::from_octets(self.src_addr)
+    }
+
+    /// destination address
+    #[inline(always)]
+    pub fn dip(&self) -> Ipv4Addr {
+        Ipv4Addr::from_octets(self.dest_addr)
     }
 
     #[inline(always)]

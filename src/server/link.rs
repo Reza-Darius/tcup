@@ -11,17 +11,22 @@ use crate::{
 
 use futures::StreamExt;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tracing::error;
+use tracing::{error, instrument};
+
+pub trait LinkService {
+    type Sender: LinkSink + Clone;
+
+    fn sender(&self) -> Self::Sender;
+    fn recv(&mut self) -> Option<Packet<ETH>>;
+
+    fn addr(&self) -> IpAddr;
+    fn mac(&self) -> Mac;
+}
 
 pub trait LinkSink {
     type Error;
-    async fn send_frame(&mut self, packet: Packet<ETH>) -> Result<(), Self::Error>;
-    async fn send_frames(&mut self, packets: Vec<Packet<ETH>>) -> Result<(), Self::Error>;
-}
-
-pub trait LinkStream {
-    type Error;
-    async fn recv_frame(&mut self) -> Result<Packet<ETH>, Self::Error>;
+    async fn send_frame(&self, packet: Packet<ETH>) -> Result<(), Self::Error>;
+    async fn send_frames(&self, packets: Vec<Packet<ETH>>) -> Result<(), Self::Error>;
 }
 
 pub enum TAPActorMessage {
@@ -42,8 +47,8 @@ impl From<Vec<Packet<ETH>>> for TAPActorMessage {
 }
 
 pub struct TAPActorHandle {
-    addr: Option<IpAddr>,
-    mac: Mac,
+    pub addr: Option<IpAddr>,
+    pub mac: Mac,
     sender: Sender<TAPActorMessage>,
     receiver: Receiver<Packet<ETH>>,
 }
@@ -76,6 +81,14 @@ impl TAPActorHandle {
             receiver: packet_rx,
         })
     }
+
+    pub fn sender(&self) -> Sender<TAPActorMessage> {
+        self.sender.clone()
+    }
+
+    pub async fn recv(&mut self) -> Option<Packet<ETH>> {
+        self.receiver.recv().await
+    }
 }
 
 impl TAPActorHandle {
@@ -99,21 +112,25 @@ pub struct TAPActor {
 }
 
 impl TAPActor {
+    #[instrument(name = "TAP_actor", skip_all)]
     async fn run(&mut self) {
         loop {
             tokio::select! {
                 Some(res) = self.tap.next() => {
                     match res {
-                        Err(e) => {
+                        Err(e) if e.kind() != std::io::ErrorKind::InvalidData => {
                             error!(%e, "error when reading from stream");
                         },
                         Ok(packet) => {
                             self.sender.send(packet).await.expect("the receiver cant be closed");
                         },
+                        _ => {}
                     };
                 }
                 Some(msg) = self.receiver.recv() => {
-                    let _ =self.handle_message(msg).await;
+                    if let Err(e) = self.handle_message(msg).await {
+                        error!(%e, "error when handling message");
+                    };
                 }
             }
         }

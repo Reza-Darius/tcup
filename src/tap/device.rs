@@ -1,5 +1,5 @@
 use crate::{
-    eth::{ETH_FRAME_MAX_SIZE, Mac},
+    eth::{ETH_FRAME_MAX_SIZE, EthErr, Mac},
     tap::device::TapError::UdevError,
     utils::packet::{ETH, Packet, PacketBuf},
 };
@@ -8,7 +8,7 @@ use std::{
     ffi::OsStr,
     io,
     mem::MaybeUninit,
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr},
     os::fd::{AsRawFd, OwnedFd, RawFd},
     pin::Pin,
     string::FromUtf8Error,
@@ -35,9 +35,17 @@ pub struct TAPDevice {
     fd: AsyncFd<OwnedFd>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TAPDeviceOptions {
     pub addr: Option<(IpAddr, u8)>,
+}
+
+impl Default for TAPDeviceOptions {
+    fn default() -> Self {
+        Self {
+            addr: Some((IpAddr::V4(Ipv4Addr::from_octets([10, 0, 0, 1])), 24)),
+        }
+    }
 }
 
 static ONE_TAP: Once = Once::new();
@@ -349,10 +357,7 @@ impl Stream for TAPStream {
 
         match Packet::<ETH>::parse(read_buf.filled()) {
             Ok(packet) => Poll::Ready(Some(Ok(packet))),
-            Err(e) => {
-                trace!(%e, "failed to parse frame");
-                Poll::Ready(Some(Err(io::Error::new(io::ErrorKind::InvalidData, e))))
-            }
+            Err(e) => Poll::Ready(Some(Err(io::Error::new(io::ErrorKind::InvalidData, e)))),
         }
     }
 }

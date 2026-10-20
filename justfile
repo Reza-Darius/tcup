@@ -1,4 +1,4 @@
-CRATE := "tcup"
+SERVER_BIN := "tcup"
 DEBUG_DIR := "target/debug/"
 CAP := "cap_net_admin+ep"
 
@@ -10,10 +10,10 @@ set_cap bin:
     sudo setcap {{ CAP }} {{ DEBUG_DIR }}{{ bin }}
 
 run: build cap
-    cargo run
+    cargo run --bin {{ SERVER_BIN }}
 
 build:
-    cargo build
+    cargo build --bin {{ SERVER_BIN }}
 
 cap:
-    sudo setcap {{ CAP }} {{ DEBUG_DIR }}{{ CRATE }}
+    sudo setcap {{ CAP }} {{ DEBUG_DIR }}{{ SERVER_BIN }}

@@ -3,7 +3,7 @@
 use std::net::Ipv4Addr;
 
 use num_enum::TryFromPrimitive;
-use tracing::{debug, trace};
+use tracing::debug;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
 use crate::eth::ETH_HDR_SIZE;
@@ -34,7 +34,10 @@ impl Packet<ICMP> {
         let packet = data.payload();
 
         if packet.len() < ICMP_HDR_SIZE {
-            return Err(ICMPError("payload size smaller than ICMP hdr size".into()));
+            return Err(ICMPError(format!(
+                "payload size smaller than ICMP hdr size, payload len {}",
+                packet.len()
+            )));
         }
 
         let check = calc_checksum_be(packet);
@@ -88,7 +91,7 @@ impl std::fmt::Display for Echo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let id = self.id.get();
         let seq = self.seq.get();
-        writeln!(f,"Echo id: {}, seq: {}", id, seq)
+        writeln!(f, "Echo id: {}, seq: {}", id, seq)
     }
 }
 
@@ -104,12 +107,11 @@ fn handle_echo_req(mut req: Packet<ICMP>) -> Packet<ICMP> {
     // ICMP portion of the packet
     let icmp_slice = &mut req.as_buf_mut()[ICMP_PACKET_OFFSET..];
 
-    let echo_payload =
-        Echo::ref_from_bytes(&icmp_slice[ICMP_HDR_SIZE..]).expect("the packet is parsed");
+    let echo_payload = Echo::ref_from_prefix(&icmp_slice[ICMP_HDR_SIZE..])
+        .expect("the packet is parsed")
+        .0;
 
     debug!(%echo_payload, "handling echo request");
-
-    debug_assert!(icmp_slice.len() == 8);
 
     let rep_icmp_hdr = ICMPHdr {
         msg_type: TYPE_ECHO_REPLY,

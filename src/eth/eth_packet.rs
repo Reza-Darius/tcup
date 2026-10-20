@@ -1,4 +1,5 @@
 use num_enum::TryFromPrimitive;
+use tracing::debug;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
 use super::mac::*;
@@ -102,7 +103,7 @@ impl Packet<ETH> {
         };
 
         debug_assert!(data.len() >= ETH_HDR_SIZE);
-        debug_assert!(data.len() <= ETH_FRAME_MIN_SIZE);
+        debug_assert!(data.len() <= ETH_FRAME_MAX_SIZE);
 
         let hdr = EthHdr::new(dmac, smac, prot);
 
