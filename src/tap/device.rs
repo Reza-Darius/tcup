@@ -1,8 +1,6 @@
-#![allow(dead_code, unused_variables, unused_assignments)]
-
 use crate::{
     eth::{ETH_FRAME_MAX_SIZE, Mac},
-    tap::common::TapError::UdevError,
+    tap::device::TapError::UdevError,
     utils::packet::{ETH, Packet, PacketBuf},
 };
 
@@ -14,6 +12,7 @@ use std::{
     os::fd::{AsRawFd, OwnedFd, RawFd},
     pin::Pin,
     string::FromUtf8Error,
+    sync::Once,
     task::{Context, Poll, ready},
 };
 
@@ -24,7 +23,6 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, unix::AsyncFd};
 use tracing::{instrument, trace};
 use udev::MonitorSocket;
-
 
 /// linux tap device which can receive ethernet frames
 ///
@@ -42,6 +40,8 @@ pub struct TAPDeviceOptions {
     pub addr: Option<(IpAddr, u8)>,
 }
 
+static ONE_TAP: Once = Once::new();
+
 impl TAPDevice {
     /// creates a new TAP network device, requires CAP_NET_ADMIN privleges
     ///
@@ -51,9 +51,13 @@ impl TAPDevice {
     ///
     /// # Panic:
     ///
-    /// This function panics if called outside of a tokio context.
+    /// This function panics if called outside of a tokio context or if called more than once
     #[instrument(skip_all)]
     pub async fn new(name: impl Into<String>, opts: TAPDeviceOptions) -> Result<Self, TapError> {
+        if ONE_TAP.is_completed() {
+            panic!("tap init called again")
+        }
+
         let name = name.into();
 
         if !name.is_ascii() {
@@ -99,6 +103,8 @@ impl TAPDevice {
         await_udev(monitor_sock, &name).await?;
         let mac = request_mac(tap.as_raw_fd(), name.as_bytes())?;
         trace!(mac = %mac,"received mac");
+
+        ONE_TAP.call_once(|| {});
 
         Ok(TAPDevice {
             name,
@@ -301,6 +307,7 @@ async fn if_add_addr(
 }
 
 pin_project_lite::pin_project! {
+    /// TAP device with internal buffer of size 1514 that implements [stream] for ethernet frames
     pub struct TAPStream {
         buf: Box<[MaybeUninit<u8>]>,
         #[pin]
@@ -333,9 +340,10 @@ impl Stream for TAPStream {
 
         let mut read_buf = ReadBuf::uninit(this.buf);
 
-        if let Err(e) = ready!(this.tap.poll_read(cx, &mut read_buf)) {
-            return Poll::Ready(Some(Err(e)));
-        };
+        ready!(this.tap.poll_read(cx, &mut read_buf))?;
+        // if let Err(e) = ready!(this.tap.poll_read(cx, &mut read_buf)) {
+        //     return Poll::Ready(Some(Err(e)));
+        // };
 
         trace!("read {} bytes in stream", read_buf.filled().len());
 

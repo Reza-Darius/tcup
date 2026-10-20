@@ -78,7 +78,7 @@ impl Packet<ARP> {
         let mut merge_flag = false;
         let (host_mac, host_ip) = host.addr();
 
-        let _span = span!(Level::TRACE, "arp", smac = %sender_mac, sip = %sender_ip, target_ip = %target_ip).entered();
+        let _span = span!(Level::TRACE, "ARP", smac = %sender_mac, sip = %sender_ip, target_ip = %target_ip).entered();
 
         // NOTE: zerocopy's big endian types are overloaded to convert to native endian before
         // comparing
@@ -97,7 +97,7 @@ impl Packet<ARP> {
         //      if yes, update ip address with sender mac
         //          set merge_flag = true
         if host.update_if_present(sender_mac, sender_ip) {
-            trace!("updated arp entry");
+            trace!("updated store entry entry");
             merge_flag = true;
         }
 
@@ -110,11 +110,11 @@ impl Packet<ARP> {
         // if merge_flag = false add sender ip address with sender mac to table
         if !merge_flag {
             host.insert(sender_mac, sender_ip);
-            trace!("inserted arp entry");
+            trace!("inserted entry");
         }
 
         if arp_packet.opcode == libc::ARPOP_REPLY {
-            trace!("arp packet is reply, done");
+            trace!("ARP packet is a reply, done");
             return None;
         }
 
@@ -131,10 +131,9 @@ impl Packet<ARP> {
 
             arp_packet.opcode = libc::ARPOP_REPLY.into();
 
-            trace!("generated arp reply");
-
             self.set_hdr(arp_packet);
 
+            trace!("generated ARP reply");
             return Some(Packet::<ETH>::new(sender_mac, host_mac, self.into()));
         }
         None

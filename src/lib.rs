@@ -12,7 +12,7 @@ pub mod ip;
 // pub mod ipc;
 pub mod tap;
 // pub mod tcp;
-// pub mod server;
+pub mod server;
 pub mod utils;
 
 // pub use error::{Error, Result};

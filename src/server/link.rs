@@ -1,7 +1,8 @@
-#![allow(dead_code, unused_variables, unused_assignments)]
+use std::net::IpAddr;
 
 use crate::{
-    tap::common::{
+    eth::Mac,
+    tap::device::{
         TAPDevice, TAPDeviceOptions, TAPStream,
         TapError::{self},
     },
@@ -12,24 +13,15 @@ use futures::StreamExt;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tracing::error;
 
-pub async fn tap_init(
-    name: impl Into<String>,
-    opts: TAPDeviceOptions,
-    buf_size: usize,
-) -> Result<(TAPHandler, TAPReceiver), TapError> {
-    let tap = TAPDevice::new(name, opts).await?;
-    let (msg_tx, msg_rx) = channel::<TAPActorMessage>(buf_size);
-    let (packet_tx, packet_rx) = channel::<Packet<ETH>>(buf_size);
+pub trait LinkSink {
+    type Error;
+    async fn send_frame(&mut self, packet: Packet<ETH>) -> Result<(), Self::Error>;
+    async fn send_frames(&mut self, packets: Vec<Packet<ETH>>) -> Result<(), Self::Error>;
+}
 
-    let mut actor = TAPActor {
-        tap: tap.into_stream(),
-        receiver: msg_rx,
-        sender: packet_tx,
-    };
-
-    tokio::spawn(async move { actor.run().await });
-
-    Ok((TAPHandler(msg_tx), TAPReceiver(packet_rx)))
+pub trait LinkStream {
+    type Error;
+    async fn recv_frame(&mut self) -> Result<Packet<ETH>, Self::Error>;
 }
 
 pub enum TAPActorMessage {
@@ -49,12 +41,46 @@ impl From<Vec<Packet<ETH>>> for TAPActorMessage {
     }
 }
 
-#[derive(Clone)]
-pub struct TAPHandler(Sender<TAPActorMessage>);
+pub struct TAPActorHandle {
+    addr: Option<IpAddr>,
+    mac: Mac,
+    sender: Sender<TAPActorMessage>,
+    receiver: Receiver<Packet<ETH>>,
+}
 
-impl TAPHandler {
+impl TAPActorHandle {
+    /// initializes a new TAP device, panics if called more than once
+    pub async fn new(
+        name: impl Into<String>,
+        opts: TAPDeviceOptions,
+        buf_size: usize,
+    ) -> Result<Self, TapError> {
+        let tap = TAPDevice::new(name, opts).await?;
+        let addr = tap.addr();
+        let mac = tap.mac();
+        let (msg_tx, msg_rx) = channel::<TAPActorMessage>(buf_size);
+        let (packet_tx, packet_rx) = channel::<Packet<ETH>>(buf_size);
+
+        let mut actor = TAPActor {
+            tap: tap.into_stream(),
+            receiver: msg_rx,
+            sender: packet_tx,
+        };
+
+        tokio::spawn(async move { actor.run().await });
+
+        Ok(TAPActorHandle {
+            addr,
+            mac,
+            sender: msg_tx,
+            receiver: packet_rx,
+        })
+    }
+}
+
+impl TAPActorHandle {
     pub async fn send(&self, msg: TAPActorMessage) {
-        self.0.send(msg).await.unwrap();
+        self.sender.send(msg).await.unwrap();
     }
 }
 

@@ -86,13 +86,9 @@ struct Echo {
 
 impl std::fmt::Display for Echo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let id = self.id;
-        let seq = self.seq;
-        writeln!(
-            f,
-            "\nEcho:\n{:<10}{:>10}\n{:<10}{:>10}\n",
-            "id", id, "seq", seq
-        )
+        let id = self.id.get();
+        let seq = self.seq.get();
+        writeln!(f,"Echo id: {}, seq: {}", id, seq)
     }
 }
 
@@ -105,13 +101,13 @@ struct Unreachable {
 }
 
 fn handle_echo_req(mut req: Packet<ICMP>) -> Packet<ICMP> {
-    trace!("handling echo request");
-
     // ICMP portion of the packet
     let icmp_slice = &mut req.as_buf_mut()[ICMP_PACKET_OFFSET..];
 
-    let echo_payload = Echo::ref_from_bytes(&icmp_slice[ICMP_HDR_SIZE..]).unwrap();
-    trace!(seq = echo_payload.seq.get(), id = echo_payload.id.get());
+    let echo_payload =
+        Echo::ref_from_bytes(&icmp_slice[ICMP_HDR_SIZE..]).expect("the packet is parsed");
+
+    debug!(%echo_payload, "handling echo request");
 
     debug_assert!(icmp_slice.len() == 8);
 
