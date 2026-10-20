@@ -1,5 +1,5 @@
 use crate::{
-    eth::{ETH_FRAME_MAX_SIZE, EthErr, Mac},
+    eth::{ETH_FRAME_MAX_SIZE, Mac},
     tap::device::TapError::UdevError,
     utils::packet::{ETH, Packet, PacketBuf},
 };

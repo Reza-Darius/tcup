@@ -1,7 +1,7 @@
-mod ip_packet;
-mod icmp;
 mod error;
+mod icmp;
+mod ip_packet;
 
-pub use ip_packet::*;
-pub use icmp::*;
 pub use error::IpErr;
+pub use icmp::*;
+pub use ip_packet::*;

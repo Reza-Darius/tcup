@@ -134,9 +134,14 @@ impl Packet<IP> {
             ));
         }
 
-        IPv4Hdr::new(src_addr, dest_addr, prot, &buf[IP_HDR_MINSIZE as usize + ETH_HDR_SIZE..])
-            .write_to_prefix(&mut buf[IP_HDR_OFFSET..])
-            .expect("there should be enough space");
+        IPv4Hdr::new(
+            src_addr,
+            dest_addr,
+            prot,
+            &buf[IP_HDR_MINSIZE as usize + ETH_HDR_SIZE..],
+        )
+        .write_to_prefix(&mut buf[IP_HDR_OFFSET..])
+        .expect("there should be enough space");
 
         let mut packet: Packet<IP> = buf.into();
         packet.set_checksum();

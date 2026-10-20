@@ -17,7 +17,11 @@ pub struct TcupServer {
 }
 
 impl TcupServer {
-    pub async fn new(if_name: impl Into<String>, if_addr: (Ipv4Addr, u8), virt_addr: Ipv4Addr) -> Result<Self> {
+    pub async fn new(
+        if_name: impl Into<String>,
+        if_addr: (Ipv4Addr, u8),
+        virt_addr: Ipv4Addr,
+    ) -> Result<Self> {
         let tap = TAPActorHandle::new(
             if_name,
             TAPDeviceOptions {

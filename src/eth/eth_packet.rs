@@ -1,5 +1,4 @@
 use num_enum::TryFromPrimitive;
-use tracing::debug;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
 use super::mac::*;
