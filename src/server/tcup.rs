@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use crate::{
     eth::EthPayload,
     ip::Ipv4Payload,
-    server::link::{ARPService, TAPActorHandle},
+    server::services::{arp_svc::ARPService, tap_svc::TAPActorHandle},
     tap::device::TAPDeviceOptions,
     utils::packet::{ETH, IP, Packet},
 };

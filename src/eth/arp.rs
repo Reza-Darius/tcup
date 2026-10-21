@@ -223,7 +223,7 @@ impl Display for ArpMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{assert_matches, cell::RefCell};
+    use std::cell::RefCell;
 
     const HOST_MAC: Mac = Mac::new(0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA);
     const HOST_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
