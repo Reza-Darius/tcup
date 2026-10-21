@@ -13,6 +13,11 @@ use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MIN_SIZE};
 
 const ARP_PACKET_SIZE: usize = std::mem::size_of::<ArpMsg>();
 
+pub enum ARPServiceResult {
+    Reply(Packet<ETH>),
+    Updated(Ipv4Addr),
+}
+
 impl Packet<ARP> {
     pub(super) fn parse(eth: Packet<ETH>) -> Result<Self, EthErr> {
         let data = eth.into_buf();
@@ -69,7 +74,7 @@ impl Packet<ARP> {
 
     /// runs the incoming ARP packet reception algorithm according to RFC 826, returning a packet in case we
     /// should send a reply
-    pub fn service(mut self, host: &mut impl ARPTable) -> Option<Packet<ETH>> {
+    pub fn service(mut self, host: &mut impl ARPTable) -> Option<ARPServiceResult> {
         let mut arp_packet = self.hdr();
 
         let sender_mac = Mac::from_octets(arp_packet.smac);
@@ -77,6 +82,7 @@ impl Packet<ARP> {
         let target_ip = Ipv4Addr::from_octets(arp_packet.dip);
         let mut merge_flag = false;
         let (host_mac, host_ip) = host.addr();
+        let mut updated = false;
 
         let _span = span!(Level::TRACE, "ARP", smac = %sender_mac, sip = %sender_ip, target_ip = %target_ip).entered();
 
@@ -97,25 +103,35 @@ impl Packet<ARP> {
         //      if yes, update ip address with sender mac
         //          set merge_flag = true
         if host.update_if_present(sender_mac, sender_ip) {
-            trace!("updated store entry entry");
             merge_flag = true;
+            updated = true;
+            trace!("updated store entry entry");
         }
 
         // am i the target of the ip address?
         if target_ip != host_ip {
             trace!("we are not targeted, done");
-            return None;
+            return if updated {
+                Some(ARPServiceResult::Updated(sender_ip))
+            } else {
+                None
+            };
         }
 
         // if merge_flag = false add sender ip address with sender mac to table
         if !merge_flag {
             host.insert(sender_mac, sender_ip);
+            updated = true;
             trace!("inserted entry");
         }
 
         if arp_packet.opcode == libc::ARPOP_REPLY {
             trace!("ARP packet is a reply, done");
-            return None;
+            return if updated {
+                Some(ARPServiceResult::Updated(sender_ip))
+            } else {
+                None
+            };
         }
 
         // if opcode == request
@@ -134,7 +150,11 @@ impl Packet<ARP> {
             self.set_hdr(arp_packet);
 
             trace!("generated ARP reply");
-            return Some(Packet::<ETH>::new(sender_mac, host_mac, self.into()));
+            return Some(ARPServiceResult::Reply(Packet::<ETH>::new(
+                sender_mac,
+                host_mac,
+                self.into(),
+            )));
         }
         None
     }
@@ -203,7 +223,7 @@ impl Display for ArpMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::{assert_matches, cell::RefCell};
 
     const HOST_MAC: Mac = Mac::new(0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA);
     const HOST_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
@@ -274,7 +294,10 @@ mod tests {
         let packet = Packet::<ARP>::new(base_request(HOST_IP));
         let mut store = MockStore::default();
 
-        let reply_eth = packet.service(&mut store).expect("expected a reply packet");
+        let reply_eth = match packet.service(&mut store).expect("expected a reply packet") {
+            ARPServiceResult::Updated(_) => panic!(),
+            ARPServiceResult::Reply(frame) => frame,
+        };
 
         let reply_arp =
             Packet::<ARP>::parse(reply_eth).expect("reply should be a valid parseable ARP packet");
@@ -302,7 +325,7 @@ mod tests {
         let mut store = MockStore::default();
 
         let result = packet.service(&mut store);
-        assert!(result.is_none());
+        assert!(!matches!(result, Some(ARPServiceResult::Reply(_))));
         assert_eq!(store.insert_calls.borrow().len(), 1);
     }
 

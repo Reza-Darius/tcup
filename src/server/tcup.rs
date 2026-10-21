@@ -1,9 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::{
-    eth::{ARPService, EthPayload},
+    eth::EthPayload,
     ip::Ipv4Payload,
-    server::link::TAPActorHandle,
+    server::link::{ARPService, TAPActorHandle},
     tap::device::TAPDeviceOptions,
     utils::packet::{ETH, IP, Packet},
 };
@@ -30,7 +30,7 @@ impl TcupServer {
             512,
         )
         .await?;
-        let arp = ARPService::new(tap.mac, virt_addr);
+        let arp = ARPService::new(tap.mac, virt_addr, tap.sender());
 
         Ok(TcupServer {
             virt_host: virt_addr,
@@ -60,11 +60,8 @@ impl TcupServer {
 
         match payload {
             EthPayload::Arp(packet) => {
-                // TODO: maybe check a waiting IP queue here?
-                if let Some(reply) = self.arp_svc.handle_packet(packet) {
-                    self.link_svc.send(reply.into()).await;
-                    debug!("sent ARP reply");
-                };
+                self.arp_svc.service_arp(packet).await;
+                debug!("sent ARP reply");
             }
             EthPayload::Ip(packet) => {
                 self.handle_ip_packet(packet).await?;
@@ -84,17 +81,18 @@ impl TcupServer {
         match payload {
             Ipv4Payload::Icmp(packet) => {
                 if let Some(reply) = packet.service(hdr.sip(), hdr.dip()) {
-                    // do we have an address?
-                    if let Some(mac_addr) = self.arp_svc.get_mac(hdr.sip()) {
-                        // if yes, build eth frame and send it
-                        let frame = Packet::<ETH>::new(mac_addr, self.link_svc.mac, reply.into());
-                        self.link_svc.send(frame.into()).await;
-                        debug!("ICMP reply sent");
-                    } else {
-                        // if no, queue up the packet and send an arp request
-                        let arp_req = self.arp_svc.request_mac(hdr.sip());
-                        self.link_svc.send(arp_req.into()).await;
-                    }
+                    self.arp_svc.service_ip(reply).await;
+                    // // do we have an address?
+                    // if let Some(mac_addr) = self.arp_svc.get_mac(hdr.sip()) {
+                    //     // if yes, build eth frame and send it
+                    //     let frame = Packet::<ETH>::new(mac_addr, self.link_svc.mac, reply.into());
+                    //     self.link_svc.send(frame.into()).await;
+                    //     debug!("ICMP reply sent");
+                    // } else {
+                    //     // if no, queue up the packet and send an arp request
+                    //     let arp_req = self.arp_svc.request_mac(hdr.sip());
+                    //     self.link_svc.send(arp_req.into()).await;
+                    // }
                 }
             }
             Ipv4Payload::Tcp(packet) => unimplemented!(),

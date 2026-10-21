@@ -353,7 +353,7 @@ impl Stream for TAPStream {
         //     return Poll::Ready(Some(Err(e)));
         // };
 
-        trace!("read {} bytes in stream", read_buf.filled().len());
+        trace!(nbytes = read_buf.filled().len(), "read bytes in stream");
 
         match Packet::<ETH>::parse(read_buf.filled()) {
             Ok(packet) => Poll::Ready(Some(Ok(packet))),

@@ -156,6 +156,24 @@ impl Packet<IP> {
             .expect("the packet is parsed")
     }
 
+    #[inline(always)]
+    pub fn sip(&self) -> Ipv4Addr {
+        Ipv4Addr::from_octets(
+            *self.as_buf()[IP_HDR_OFFSET + 12..IP_HDR_OFFSET + 16]
+                .as_array()
+                .expect("the packet is parsed"),
+        )
+    }
+
+    #[inline(always)]
+    pub fn dip(&self) -> Ipv4Addr {
+        Ipv4Addr::from_octets(
+            *self.as_buf()[IP_HDR_OFFSET + 16..IP_HDR_OFFSET + 20]
+                .as_array()
+                .expect("the packet is parsed"),
+        )
+    }
+
     /// convenience function
     #[inline(always)]
     pub fn to_eth(self, dmac: impl Into<Mac>, smac: impl Into<Mac>) -> Packet<ETH> {
