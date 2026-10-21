@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 
+use crate::{eth::ARPTable, utils::packet::ARP};
 use crate::{
     eth::Mac,
     tap::device::{
@@ -9,10 +10,6 @@ use crate::{
     utils::packet::{ETH, IP, Packet},
 };
 use std::{collections::HashMap, net::Ipv4Addr};
-
-use tracing::trace;
-
-use crate::{eth::ARPTable, utils::packet::ARP};
 
 use futures::StreamExt;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
