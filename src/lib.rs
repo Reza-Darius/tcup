@@ -11,7 +11,7 @@ pub mod eth;
 pub mod ip;
 // pub mod ipc;
 pub mod tap;
-// pub mod tcp;
+pub mod tcp;
 pub mod server;
 pub mod utils;
 

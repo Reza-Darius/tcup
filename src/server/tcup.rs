@@ -8,7 +8,7 @@ use crate::{
     utils::packet::{ETH, IP, Packet},
 };
 use anyhow::Result;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, info, instrument};
 
 pub struct TcupServer {
     virt_host: Ipv4Addr,
@@ -44,7 +44,7 @@ impl TcupServer {
 
         while let Some(packet) = self.link_svc.recv().await {
             if let Err(e) = self.handle_inc(packet).await {
-                error!(%e, "error when handling packet");
+                debug!(%e, "error when handling packet");
             }
         }
 
@@ -74,9 +74,12 @@ impl TcupServer {
     async fn handle_ip_packet(&mut self, packet: Packet<IP>) -> Result<()> {
         let (hdr, payload) = packet.into_parts()?;
 
-        // is this packet for us?
-
         debug!(ip_packet = %hdr);
+
+        // is this packet for us?
+        if hdr.dip() != self.virt_host {
+            return Ok(());
+        }
 
         match payload {
             Ipv4Payload::Icmp(packet) => {

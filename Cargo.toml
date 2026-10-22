@@ -13,7 +13,6 @@ path = "src/bin/cli.rs"
 
 [dependencies]
 async-trait = "0.1.89"
-bincode = "2.0.0"
 bitflags = { version = "2.11.0", features = ["bytemuck", "std"] }
 bytemuck = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
 zerocopy = { version = "0.8.0" }

@@ -25,6 +25,11 @@ impl<P: PacketType> PacketBuf for Packet<P> {
         &mut self.data
     }
 
+    #[inline(always)]
+    fn buf_ref_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.data
+    }
+
     /// unwrap the packet to the underlying buffer
     #[inline(always)]
     fn into_buf(self) -> Vec<u8> {
@@ -60,9 +65,11 @@ impl<P: PacketType> AsRef<[u8]> for Packet<P> {
 pub trait PacketBuf {
     fn as_buf(&self) -> &[u8];
     fn as_buf_mut(&mut self) -> &mut [u8];
+    fn buf_ref_mut(&mut self) -> &mut Vec<u8>;
     fn into_buf(self) -> Vec<u8>;
     fn from_vec(data: Vec<u8>) -> Self;
 
+    /// length of the entire buffer
     fn len(&self) -> usize {
         self.as_buf().len()
     }

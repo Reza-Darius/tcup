@@ -13,6 +13,7 @@ use crate::eth::{ETH_HDR_SIZE, ETH_PAY_MIN_SIZE};
 
 const ARP_PACKET_SIZE: usize = std::mem::size_of::<ArpMsg>();
 
+/// enum to track ARP changes in case we need to deal with waiting IP packets
 pub enum ARPServiceResult {
     Reply(Packet<ETH>),
     Updated(Ipv4Addr),

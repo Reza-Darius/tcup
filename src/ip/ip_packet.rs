@@ -28,8 +28,8 @@ pub const IP_DF: u16 = 0x4000; // don't fragment
 pub const IP_MF: u16 = 0x2000; // more fragments
 pub const FRAG_OFFSET_MASK: u16 = 0x1FFF;
 
-/// start of the IP header
-const IP_HDR_OFFSET: usize = ETH_HDR_SIZE;
+/// start of the IP header in an eth frame buffer
+pub const IP_HDR_OFFSET: usize = ETH_HDR_SIZE;
 /// offset for checksum field
 const IP_CHECK_OFFSET: usize = IP_HDR_OFFSET + 10;
 /// offset for protocol byte
@@ -83,7 +83,7 @@ impl Packet<IP> {
             .0;
 
         Ipv4Prot::try_from(hdr.prot)
-            .map_err(|e| ParseError(format!("unsupported IP payload, ver: {}", hdr.prot)))?;
+            .map_err(|e| ParseError(format!("unsupported IP payload protocol, ver: {}", hdr.prot)))?;
 
         if !hdr.is_fragmented() {
             return Err(ParseError("fragmentation is not supported".into()));
@@ -257,7 +257,7 @@ pub struct IPv4Hdr {
     ver_ihl: u8,
     /// type of service, in newer versiond the first 6 bits are the "differentiated server field" (DS field)
     tos: u8,
-    /// length of the whole IP datagram
+    /// length of the whole IP datagram, header AND payload
     tot_len: U16<BE>,
     id: U16<BE>,
     // first 3 bits are flags, rest offset
@@ -325,7 +325,7 @@ impl IPv4Hdr {
         get_hdr_len(self.ver_ihl)
     }
 
-    /// retrieves the total size of the IP header in bytes
+    /// retrieves the total size of the IP datagram in bytes
     #[inline(always)]
     pub fn tot_len(&self) -> u16 {
         self.tot_len.get()
