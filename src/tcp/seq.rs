@@ -11,7 +11,7 @@ use crate::tcp::timer::TICK;
 use super::sock::TCPCon;
 
 #[derive(Debug, Clone, Copy, Display)]
-struct Seq(u32);
+pub struct Seq(u32);
 
 impl Seq {
     pub fn new(con: &TCPCon) -> Self {
@@ -23,6 +23,10 @@ impl Seq {
         con.hash(&mut hasher);
 
         Seq(hasher.finish() as u32)
+    }
+
+    pub fn get(&self) -> u32 {
+        self.0
     }
 
     // pub fn cmp(&self, other: Seq) -> Ordering {
@@ -86,6 +90,14 @@ impl PartialOrd for Seq {
             _ => None,
         }
     }
+}
+
+pub fn before(a: u32, b: u32) -> bool {
+    seq_lt(a, b)
+}
+
+pub fn after(a: u32, b: u32) -> bool {
+    seq_gt(a, b)
 }
 
 /// a < b

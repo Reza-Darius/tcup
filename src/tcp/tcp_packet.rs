@@ -119,6 +119,10 @@ impl TCPHdr {
         self.flags & TCPFlags::ACK == TCPFlags::ACK
     }
 
+    pub fn pure_ack(&self) -> bool {
+        self.is_ack() && !self.is_syn() && !self.is_fin() && !self.is_rst()
+    }
+
     pub fn is_fin(&self) -> bool {
         self.flags & TCPFlags::FIN == TCPFlags::FIN
     }

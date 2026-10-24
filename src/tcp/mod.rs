@@ -1,5 +1,7 @@
+mod buffer;
 mod error;
 mod handler;
+mod heap;
 mod opts;
 mod rto;
 mod seq;

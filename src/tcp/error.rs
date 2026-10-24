@@ -12,4 +12,6 @@ pub enum TCPError {
     HandlerError(String),
     #[error("{0}")]
     SKCBError(String),
+    #[error("{0}")]
+    BufferError(String),
 }

@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::Sender;
 
 use crate::{
-    tcp::sock::{SocketCall, TCBMessage, TCPCon}, utils::packet::{IP, Packet, TCP},
+    tcp::sock::{SocketCall, TCBMessage, TCPCon},
+    utils::packet::{IP, Packet, TCP},
 };
 
 pub trait TransportService {

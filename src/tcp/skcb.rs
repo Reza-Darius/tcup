@@ -7,6 +7,7 @@ use tracing::{error, trace, warn};
 use super::sock::TCPCon;
 use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::ip::IPv4Hdr;
+use crate::tcp::buffer::{RcvBuf, SendBuf};
 use crate::tcp::error::TCPError::{self, SKCBError};
 use crate::tcp::handler::dispatch;
 use crate::tcp::{
@@ -24,6 +25,8 @@ pub const WND_SIZE: u16 = 10000;
 
 pub const CHAN_BUF_SIZE: usize = ETH_FRAME_MAX_SIZE * 100;
 pub const SYN_ACK_RETRIES: u64 = 5;
+
+pub const SND_RCV_BUF_SIZE: usize = 512;
 
 type Result<T> = std::result::Result<T, TCPError>;
 
@@ -60,9 +63,9 @@ pub struct SkCbInner {
     pub out_chan: Sender<Packet<IP>>,
 
     /// buffer for outgoing data
-    pub snd_buf: Vec<u8>,
+    pub snd_buf: SendBuf,
     /// buffer for incoming data
-    pub rcv_buf: Vec<u8>,
+    pub rcv_buf: RcvBuf,
 }
 
 #[derive(Debug)]
@@ -81,8 +84,8 @@ impl SkCb {
                 in_chan: rx,
                 out_chan: tx,
 
-                snd_buf: Vec::with_capacity(1024),
-                rcv_buf: vec![],
+                snd_buf: SendBuf::new(SND_RCV_BUF_SIZE),
+                rcv_buf: RcvBuf::new(SND_RCV_BUF_SIZE),
                 // rt_queue: RTQ(VecDeque::new()),
                 status: TCPState::Closed,
                 con,
@@ -327,7 +330,7 @@ impl SkCb {
     // }
 
     /// return true if the loop should skip, i.e the segment gets dropped
-    pub fn handle_rst(&mut self, seg: &Packet<TCP>) -> bool {
+    pub fn drop_on_rst(&mut self, seg: &Packet<TCP>) -> bool {
         let hdr = seg.hdr();
         if !hdr.is_rst() {
             return false;
@@ -390,7 +393,7 @@ impl SkCb {
     }
 
     /// returns true if the segment should be dropped
-    pub fn handle_syn(&mut self, seg: &Packet<TCP>) -> bool {
+    pub fn drop_on_syn(&mut self, seg: &Packet<TCP>) -> bool {
         false
         // if !seg.hdr.check_syn() {
         //     return false;
@@ -435,10 +438,13 @@ pub struct Tcb {
     /// initial receive sequence number
     pub irs: u32,
 
-    // values of the last received segment
+    /// sequence number of the current segment
     pub seg_seq: u32,
+    /// acknowledgment number of the current segment
     pub seg_ack: u32,
+    /// len of the payload of the current segment
     pub seg_len: u32,
+    /// advertised window of the current segment
     pub seg_wnd: u16,
 
     /// last sequence number of a segment

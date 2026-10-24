@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use tracing::{debug, error, info, instrument};
 
 use super::error::TCPError;
@@ -92,11 +94,12 @@ pub async fn dispatch(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
 
     // these behaviours are mostly the same across states so we can handle them right here
     if let TCPEvent::Seg(ref seg) = event {
-        if skcb.handle_rst(seg) {
+        // what to do when we get a syn rst packet?
+        if skcb.drop_on_rst(seg) {
             return Ok(());
         };
         // currently a noop
-        if skcb.handle_syn(seg) {
+        if skcb.drop_on_syn(seg) {
             return Ok(());
         }
     }
@@ -224,22 +227,27 @@ async fn listen(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     }
 }
 
+/// event handler for SYN SENT TCP state
 async fn syn_sent(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     todo!()
 }
 
+/// event handler for FIN WAIT1 TCP state
 async fn finwait1(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     todo!()
 }
 
+/// event handler for FIN WAIT2 TCP state
 async fn finwait2(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     todo!()
 }
 
+/// event handler for CLOSING TCP state
 async fn closing(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     todo!()
 }
 
+/// event handler for TIME WAIT TCP state
 async fn timewait(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     match event {
         TCPEvent::Timeout => skcb.status = TCPState::Closed,
@@ -266,6 +274,7 @@ async fn timewait(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
                               Figure 7.
 */
 
+/// event handler for SYN RECEIVED TCP state
 async fn syn_received(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     match event {
         TCPEvent::Seg(seg) => {
@@ -311,6 +320,7 @@ async fn syn_received(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
                 debug!("connection established!");
                 skcb.status = TCPState::Established;
 
+                // TODO: place any data that accompanies this ack into the buffer
                 return Ok(());
             } else {
                 let mut tcp_hdr = TCPHdr {
@@ -340,6 +350,7 @@ async fn syn_received(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     Ok(())
 }
 
+/// event handler for ESTABLISHED TCP state
 async fn established(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     match event {
         TCPEvent::Seg(seg) => established_seg(skcb, seg).await,
@@ -347,16 +358,12 @@ async fn established(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     }
 }
 
+/// handler for segment event in ESTABLISHED TCP state
 async fn established_seg(skcb: &mut SkCb, seg: Packet<TCP>) -> Result<()> {
     skcb.check_seg().await?;
     let seg_hdr = seg.hdr();
 
-    if seg_hdr.is_syn() {
-        skcb.send_ack().await?;
-        return Err(HandlerError(
-            "SYN packet received in synchronized state".to_string(),
-        ));
-    }
+    // syn and rst case are handled already
 
     if !seg_hdr.is_ack() {
         return Err(HandlerError("ACK not set".to_string()));
@@ -368,6 +375,7 @@ async fn established_seg(skcb: &mut SkCb, seg: Packet<TCP>) -> Result<()> {
     let seg_seq = skcb.tcb.seg_seq;
     let snd_nxt = skcb.tcb.snd_nxt;
 
+    // check segment for ACKs to our sent data
     if seq_lte(seg_ack, snd_una) {
         return Err(HandlerError("duplicate ACK received".to_string()));
     }
@@ -377,13 +385,17 @@ async fn established_seg(skcb: &mut SkCb, seg: Packet<TCP>) -> Result<()> {
         skcb.send_ack().await?;
         return Err(HandlerError("ACK for unseen segment received".into()));
     }
-
+    // check for snd window = seg window, advertised window hasnt changed
     if seq_lt(snd_una, seg_ack) && seq_lte(seg_ack, snd_nxt) {
-        // the sequences was acknowledged within our send window
+        // we got an ACK within our send window
         // we can move the send window forward
-        // TODO: pop from retransmission queue here
-        // TODO: if the buffer has been acknowledged, return OK response to user
-        skcb.tcb.snd_una = skcb.tcb.seg_ack;
+        // TODO::
+        // - pop data from sendbuffer/retransmission queue
+        // - If the received segment acknowledges all outstanding data (snd_una equals snd_max), the
+        //   retransmission timer is turned off. Otherwise, if the persist timer is off, the retransmit timer is restarted
+        // - if the buffer has been fully acknowledged, return OK response to user
+        skcb.snd_buf.free_n(snd_una.abs_diff(seg_ack) as usize);
+        skcb.tcb.snd_una = seg_ack;
 
         // update window
         if seq_lt(skcb.tcb.snd_wl1, seg_seq)
@@ -395,24 +407,22 @@ async fn established_seg(skcb: &mut SkCb, seg: Packet<TCP>) -> Result<()> {
         }
     };
 
-    // TODO: sixth, check URG
+    // check segment for received data
 
-    // seventh, process the segment text,
-
-    let seg_data = seg.payload();
-    info!("got {} bytes of data, advancing rcv_nxt", seg_data.len());
-
-    skcb.rcv_buf.extend_from_slice(seg_data);
-    println!(
-        "\nsent via tcup:\n{}",
-        str::from_utf8(skcb.rcv_buf.as_slice()).unwrap()
-    );
-
+    // segment is next expected data so we move the window
     if skcb.tcb.seg_seq == skcb.tcb.rcv_nxt {
+        let seg_data = seg.payload();
+        debug!("got {} bytes of data, advancing rcv_nxt", seg_data.len());
+        let rcv_nxt = skcb.tcb.rcv_nxt;
+        skcb.rcv_buf.insert(seg_data, rcv_nxt);
+
         skcb.tcb.rcv_nxt += skcb.tcb.seg_len;
         skcb.tcb.rcv_wnd += skcb.tcb.seg_len;
     } else {
-        // TODO: out of order segments (duplicate acknowledgment)
+        // TODO:
+        // If this test is false, then the received segment is
+        // either a retransmission or a segment beyond the one expected
+        // right now we just drop the packet
     }
 
     // eighth, check the FIN bit,
@@ -427,8 +437,10 @@ async fn established_seg(skcb: &mut SkCb, seg: Packet<TCP>) -> Result<()> {
     Ok(())
 }
 
+/// handler for send event in ESTABLISHED TCP state
 async fn established_send() {}
 
+/// event handler for CLOSE WAIT TCP state
 async fn close_wait(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     // TODO: send remaining data
 
