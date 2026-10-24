@@ -1,6 +1,4 @@
-use std::rc::Rc;
-
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, instrument};
 
 use super::error::TCPError;
 use crate::eth::ETH_FRAME_MAX_SIZE;

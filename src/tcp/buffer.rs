@@ -82,7 +82,18 @@ impl RcvBuf {
         if self.data.is_empty() {
             self.base = seq;
         }
-        self.data.insert(self.key(seq), data.as_ref().to_vec());
+
+        match self.data.entry(self.key(seq)) {
+            std::collections::btree_map::Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert_entry(data.as_ref().to_vec());
+            }
+            std::collections::btree_map::Entry::Occupied(mut occupied_entry) => {
+                let data = data.as_ref();
+                if occupied_entry.get().len() < data.len() {
+                    occupied_entry.insert(data.to_vec());
+                };
+            }
+        };
     }
 
     pub fn pop(&mut self, rcv_nxt: u32) -> Option<Vec<u8>> {
