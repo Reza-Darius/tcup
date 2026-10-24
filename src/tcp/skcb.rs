@@ -1,26 +1,31 @@
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc::Receiver;
-use tracing::{debug, error, trace, warn};
+use tokio::sync::mpsc::{Receiver, Sender};
+use tracing::{error, trace, warn};
 
-use crate::error::{Error, Result};
-use crate::eth::{ETH_P_IP, EthHdr, EthPacket};
-use crate::ip::{IP_DF, IP_HDR_MINSIZE, IP_hdr, IPPROTO_TCP, TOS_BEST_EFFORT, TTL_START};
+use super::sock::TCPCon;
+use crate::eth::ETH_FRAME_MAX_SIZE;
+use crate::ip::IPv4Hdr;
+use crate::tcp::error::TCPError::{self, SKCBError};
+use crate::tcp::handler::dispatch;
 use crate::tcp::{
-    TCP_HDR_MINSIZE, WND_SIZE,
-    buffer::RCV_BUF_SIZE,
-    hdr::{TCP_hdr, TCPFlags},
-    opts::TCP_opts,
+    opts::TCPOpts,
     rto::RTO,
-    rtq::RTQ,
     seq::*,
     sock::*,
-    tcp_check,
+    tcp_packet::{TCP_HDR_MINSIZE, TCPFlags, TCPHdr},
     timer::TIME_WAIT,
 };
-use crate::tcup::TCup;
-use crate::types::TCPCon;
+use crate::utils::packet::{IP, Packet, TCP};
+
+pub const WRD_SIZE: usize = 4;
+pub const WND_SIZE: u16 = 10000;
+
+pub const CHAN_BUF_SIZE: usize = ETH_FRAME_MAX_SIZE * 100;
+pub const SYN_ACK_RETRIES: u64 = 5;
+
+type Result<T> = std::result::Result<T, TCPError>;
 
 // this is just a wrapper, see below for the real meat and potatoes
 #[derive(Debug)]
@@ -49,16 +54,15 @@ pub struct SkCbInner {
     pub tcb: Tcb,
     pub open: Open,
 
-    pub rcv_chan: Receiver<SocketWorkerMsg>,
-    // TODO: out of order, and in order buffer
-    /// buffer for the output message
-    pub rcv_buffer: Vec<u8>,
+    /// communication channel for receiving TCP data and user calls
+    pub in_chan: Receiver<TCBMessage>,
+    /// sender for giving out IP packets to be handled by lower layer
+    pub out_chan: Sender<Packet<IP>>,
 
-    pub tcup: TCup,
-    /// buffer for the input message
+    /// buffer for outgoing data
     pub snd_buf: Vec<u8>,
-    /// retransmission queue
-    pub rtq: RTQ,
+    /// buffer for incoming data
+    pub rcv_buf: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -68,16 +72,17 @@ pub enum Open {
 }
 
 impl SkCb {
-    pub fn new(rx: Receiver<SocketWorkerMsg>, tcup: TCup, con: TCPCon) -> Self {
+    pub fn new(rx: Receiver<TCBMessage>, tx: Sender<Packet<IP>>, con: TCPCon) -> Self {
         SkCb {
             inner: Box::new(SkCbInner {
                 tcb: Tcb::default(),
                 open: Open::Passive,
-                rcv_chan: rx,
-                rcv_buffer: Vec::with_capacity(RCV_BUF_SIZE),
-                tcup,
-                snd_buf: vec![],
-                rtq: RTQ::new(),
+
+                in_chan: rx,
+                out_chan: tx,
+
+                snd_buf: Vec::with_capacity(1024),
+                rcv_buf: vec![],
                 // rt_queue: RTQ(VecDeque::new()),
                 status: TCPState::Closed,
                 con,
@@ -86,79 +91,42 @@ impl SkCb {
     }
 
     /// updates the control block
-    pub fn parse_frame(&mut self, eth: EthPacket) -> Result<TCPSegment> {
-        let inc_ip_hdr = eth.get_ip_hdr()?;
-        let inc_tcp_hdr = eth.get_tcp_hdr()?;
-
-        if !tcp_check(&inc_ip_hdr, eth.get_ip_pay()?) {
-            return Err(Error::Tcp("TCP checksum error".to_string()));
-        };
+    fn update_tcb(&mut self, eth: &Packet<TCP>) {
+        let inc_ip_hdr = eth.ip_hdr();
+        let inc_tcp_hdr = *eth.hdr();
 
         // populate control block
-        self.update(&inc_ip_hdr, &inc_tcp_hdr);
-
-        Ok(TCPSegment {
-            hdr: inc_tcp_hdr,
-            opts: eth.get_tcp_opt()?,
-            seg: eth,
-        })
+        self.update(inc_ip_hdr, &inc_tcp_hdr);
     }
 
-    /// updates the TCB with the values of a frame
-    pub fn update(&mut self, ip_hdr: &IP_hdr, tcp_hdr: &TCP_hdr) {
+    /// updates the TCB with the values of a packet
+    fn update(&mut self, ip_hdr: &IPv4Hdr, tcp_hdr: &TCPHdr) {
         let tcb = &mut self.inner.tcb;
 
-        tcb.seg_seq = tcp_hdr.seq;
-        tcb.seg_ack = tcp_hdr.ack;
-        tcb.seg_wnd = tcp_hdr.win_size;
+        tcb.seg_seq = tcp_hdr.seq.get();
+        tcb.seg_ack = tcp_hdr.ack.get();
+        tcb.seg_wnd = tcp_hdr.win_size.get();
         tcb.last_seq = tcb.seg_seq + tcb.seg_len - 1;
 
-        tcb.seg_len = ip_hdr.tot_len as u32 - ip_hdr.len() as u32 - tcp_hdr.len() as u32;
-        if tcp_hdr.check_syn() {
+        tcb.seg_len = ip_hdr.tot_len() as u32 - ip_hdr.len() as u32 - tcp_hdr.len() as u32;
+        if tcp_hdr.is_syn() {
             tcb.seg_len += 1;
         }
-        if tcp_hdr.check_fin() {
+        if tcp_hdr.is_fin() {
             tcb.seg_len += 1;
         }
     }
 
-    /// sends a packet through the open connection
-    pub async fn send(&self, tcp_hdr: TCP_hdr, opts: TCP_opts, tcp_pay: &[u8]) -> Result<()> {
-        let ip_tot_len = IP_HDR_MINSIZE + tcp_hdr.len() + tcp_pay.len();
-        let inner = &self.inner;
-
-        assert!(ip_tot_len >= IP_HDR_MINSIZE + TCP_HDR_MINSIZE);
-
-        let mut ip_hdr = IP_hdr {
-            ver_ihl: 0,
-            tos: TOS_BEST_EFFORT,
-            tot_len: ip_tot_len as u16,
-            id: 1,
-            frag_off: IP_DF,
-            ttl: TTL_START,
-            prot: IPPROTO_TCP,
-            checksum: 0,
-            src_addr: inner.con.local_ip.octets(),
-            dest_addr: inner.con.remote_ip.octets(),
-        };
-
-        ip_hdr.set_ihl(IP_HDR_MINSIZE)?;
-
-        // TODO: if this fails, close the socket
-        let dmac = self.tcup.resolve_with_arp(inner.con.remote_ip).await?;
-        let eth_hdr = EthHdr::new(dmac, self.tcup.mac(), ETH_P_IP);
-        let frame = EthPacket::new_tcp(eth_hdr, ip_hdr, tcp_hdr, opts, tcp_pay)?;
-
-        debug!(
-            "sending frame:\nETH:\nIP:{}\nTCP:{}\n{}\n",
-            frame.hdr(),
-            frame.get_ip_hdr()?,
-            frame.get_tcp_hdr()?
+    /// sends a packet out through the open connection
+    pub async fn output(&self, tcp_hdr: TCPHdr, opts: TCPOpts, tcp_pay: &[u8]) -> Result<()> {
+        let packet = Packet::<TCP>::new(
+            self.con.local_ip,
+            self.con.remote_ip,
+            tcp_hdr,
+            opts,
+            tcp_pay,
         );
-
-        let n = inner.tcup.write_tap(frame).await?;
-
-        trace!("{n} bytes written");
+        self.out_chan.send(packet).await.unwrap();
         Ok(())
     }
 
@@ -169,67 +137,61 @@ impl SkCb {
         // TODO: aggregate ACKs
 
         let inner = &self.inner;
-        let mut tcp_hdr = TCP_hdr {
-            sport: inner.con.local_port,
-            dport: inner.con.remote_port,
-            seq: inner.tcb.snd_nxt,
-            ack: inner.tcb.rcv_nxt,
+        let mut tcp_hdr = TCPHdr {
+            sport: inner.con.local_port.into(),
+            dport: inner.con.remote_port.into(),
+            seq: inner.tcb.snd_nxt.into(),
+            ack: inner.tcb.rcv_nxt.into(),
             flags: TCPFlags::default(),
-            win_size: WND_SIZE,
+            win_size: WND_SIZE.into(),
             ..Default::default()
         };
 
         tcp_hdr.set_ack();
-        tcp_hdr.set_len(TCP_HDR_MINSIZE)?;
-        self.send(tcp_hdr, TCP_opts::default(), &[]).await
+        tcp_hdr.set_len(TCP_HDR_MINSIZE);
+        self.output(tcp_hdr, TCPOpts::default(), &[]).await
     }
 
-    pub async fn send_rst(&self, tcp_hdr: &TCP_hdr) -> Result<()> {
+    pub async fn send_rst(&self, tcp_hdr: &TCPHdr) -> Result<()> {
         trace!("sending reset");
 
         let inner = &self.inner;
 
-        if tcp_hdr.check_rst() {
+        if tcp_hdr.is_rst() {
             warn!("cant respond to RST with RST");
             return Ok(());
         }
 
-        let mut tcp_hdr = TCP_hdr {
-            sport: inner.con.local_port,
-            dport: inner.con.remote_port,
+        let mut tcp_hdr = TCPHdr {
+            sport: inner.con.local_port.into(),
+            dport: inner.con.remote_port.into(),
             ..Default::default()
         };
 
         tcp_hdr.set_rst();
-        tcp_hdr.set_len(TCP_HDR_MINSIZE)?;
+        tcp_hdr.set_len(TCP_HDR_MINSIZE);
 
         match self.status {
             TCPState::Listen => {
-                tcp_hdr.seq = self.tcb.seg_ack;
+                tcp_hdr.seq = self.tcb.seg_ack.into();
             }
             _ => {
-                if tcp_hdr.check_ack() {
+                if tcp_hdr.is_ack() {
                     tcp_hdr.seq = tcp_hdr.ack;
                 } else {
-                    tcp_hdr.seq = 0;
-                    tcp_hdr.ack = tcp_hdr.seq.wrapping_add(inner.tcb.seg_len);
+                    tcp_hdr.seq = 0.into();
+                    tcp_hdr.ack = tcp_hdr.seq.get().wrapping_add(inner.tcb.seg_len).into();
                     tcp_hdr.set_ack();
                 }
             }
         }
 
-        self.send(tcp_hdr, TCP_opts::default(), &[]).await
-    }
-
-    pub async fn close_socket(self) {
-        let inner = &self.inner;
-
-        inner.tcup.remove_sock(&inner.con);
+        self.output(tcp_hdr, TCPOpts::default(), &[]).await
     }
 
     /// checks for acceptable ACK
-    pub fn check_ack(&self, tcp_hdr: &TCP_hdr) -> bool {
-        if !tcp_hdr.check_ack() {
+    pub fn check_ack(&self, tcp_hdr: &TCPHdr) -> bool {
+        if !tcp_hdr.is_ack() {
             return true;
         }
 
@@ -293,30 +255,35 @@ impl SkCb {
 
         if !check {
             self.send_ack().await?;
-            Err(Error::Tcp("unacceptable segment".to_string()))
+            Err(SKCBError("unacceptable segment".to_string()))
         } else {
             Ok(())
         }
     }
 
-    pub async fn event_listen(&mut self) -> TCPEvent {
+    /// event loop listening for user calls, data segments and timers
+    pub async fn run(mut self) -> Result<()> {
         // we need to linger after closing the socket before reopening it as to not confuse
         // packets for the old connection
         //
         // maybe we need some way to circumvent this?
         if self.status == TCPState::TimeWait {
             tokio::time::sleep(Duration::new(TIME_WAIT, 0)).await;
-            return TCPEvent::Timeout;
+            return Ok(());
         }
 
         loop {
             tokio::select! {
-                res = self.inner.rcv_chan.recv() => {
+                res = self.inner.in_chan.recv() => {
                     trace!("message recieved");
                     let msg = res.expect("assert: the channel cant be closed");
 
-                    match self.handle_worker_msg(msg) {
-                        Ok(event) => return event,
+                    match self.handle_user_call(msg) {
+                        Ok(event) => {
+                            if let Err(e) = dispatch(&mut self, event).await {
+                                error!(%e);
+                            };
+                        },
                         Err(e) => {
                             error!(?e, "event rcv error");
                             continue;
@@ -325,47 +292,49 @@ impl SkCb {
                 }
                 _ = &mut self.inner.tcb.rto => {
                     trace!("RTO expired");
-                    return TCPEvent::Timeout
                 }
             }
         }
     }
 
-    fn handle_worker_msg(&mut self, message: SocketWorkerMsg) -> Result<TCPEvent> {
+    fn handle_user_call(&mut self, message: TCBMessage) -> Result<TCPEvent> {
         match message {
-            SocketWorkerMsg::Frame(eth_frame) => {
-                let seg = self.parse_frame(eth_frame)?;
-                Ok(TCPEvent::Seg(seg))
+            TCBMessage::Close => todo!(),
+            TCBMessage::Segment(packet) => {
+                self.update_tcb(&packet);
+                Ok(TCPEvent::Seg(packet))
             }
-            SocketWorkerMsg::Close => Ok(TCPEvent::Close),
-            SocketWorkerMsg::Send => todo!(),
+            TCBMessage::Receive(sender) => todo!(),
+            TCBMessage::Status => todo!(),
+            TCBMessage::Send(data) => todo!(),
         }
     }
 
-    pub fn update_rto(&mut self, seg: &TCPSegment) -> Result<()> {
-        // we only update RTQ/RTO if the segment advances the windows (SND.UNA) and is ack
-        match self.status {
-            TCPState::SynSent => todo!(),
-            TCPState::SynReceived => todo!(),
-            _ => todo!(),
-        }
-    }
-
-    fn retransmit(&mut self) -> Result<()> {
-        // pop seg from queue
-        // call send()
-        // dont take measurement
-        Ok(())
-    }
+    // pub fn update_rto(&mut self, seg: &TCPSegment) -> Result<()> {
+    //     // we only update RTQ/RTO if the segment advances the windows (SND.UNA) and is ack
+    //     match self.status {
+    //         TCPState::SynSent => todo!(),
+    //         TCPState::SynReceived => todo!(),
+    //         _ => todo!(),
+    //     }
+    // }
+    //
+    // fn retransmit(&mut self) -> Result<()> {
+    //     // pop seg from queue
+    //     // call send()
+    //     // dont take measurement
+    //     Ok(())
+    // }
 
     /// return true if the loop should skip, i.e the segment gets dropped
-    pub fn handle_rst(&mut self, seg: &TCPSegment) -> bool {
-        if !seg.hdr.check_rst() {
+    pub fn handle_rst(&mut self, seg: &Packet<TCP>) -> bool {
+        let hdr = seg.hdr();
+        if !hdr.is_rst() {
             return false;
         }
         match self.status {
             TCPState::SynSent => {
-                if self.check_ack(&seg.hdr) {
+                if self.check_ack(hdr) {
                     self.status = TCPState::Closed;
                     false // we drop the segment, but through the loop we cancel
                 } else {
@@ -389,7 +358,7 @@ impl SkCb {
                 }
             }
             _ => {
-                let seg_seq = seg.hdr.seq;
+                let seg_seq = hdr.seq.get();
                 if seq_gt(seg_seq, self.tcb.rcv_wnd) {
                     return true;
                 }
@@ -421,7 +390,7 @@ impl SkCb {
     }
 
     /// returns true if the segment should be dropped
-    pub fn handle_syn(&mut self, seg: &TCPSegment) -> bool {
+    pub fn handle_syn(&mut self, seg: &Packet<TCP>) -> bool {
         false
         // if !seg.hdr.check_syn() {
         //     return false;
@@ -475,8 +444,8 @@ pub struct Tcb {
     /// last sequence number of a segment
     pub last_seq: u32,
 
-    pub snd_opts: TCP_opts,
-    pub rcv_opts: TCP_opts,
+    pub snd_opts: TCPOpts,
+    pub rcv_opts: TCPOpts,
 
     pub last_snd: Option<Instant>,
     pub last_rcv: Option<Instant>,
@@ -516,7 +485,7 @@ impl std::fmt::Display for Tcb {
 }
 
 // https://datatracker.ietf.org/doc/html/rfc9293#name-state-machine-overview
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TCPState {
     SynSent,
     SynReceived,
@@ -537,23 +506,9 @@ pub enum TCPState {
 #[derive(Debug)]
 pub enum TCPEvent {
     Timeout,
-    Seg(TCPSegment),
+    Seg(Packet<TCP>),
 
     Send(Vec<u8>),
     Close,
     Abort,
-}
-
-/// parsed and validated TCP segment
-#[derive(Debug)]
-pub struct TCPSegment {
-    pub hdr: TCP_hdr,
-    pub opts: Option<TCP_opts>,
-    seg: EthPacket, // we pass the ethernet frame to reuse the allocation
-}
-
-impl TCPSegment {
-    pub fn get_pay(&self) -> &[u8] {
-        self.seg.get_tcp_pay().expect("we already validated this")
-    }
 }

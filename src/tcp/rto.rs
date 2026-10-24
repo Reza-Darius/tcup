@@ -33,7 +33,7 @@ impl RTO {
     }
 
     /// doubles the RTO
-    pub fn add_backoff(&mut self) {
+    pub fn backoff(&mut self) {
         let this = self.inner.as_mut().project();
         *this.rto *= 2;
     }

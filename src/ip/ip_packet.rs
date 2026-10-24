@@ -82,8 +82,12 @@ impl Packet<IP> {
             .map_err(|e| ParseError(format!("couldnt extract header: {e}")))?
             .0;
 
-        Ipv4Prot::try_from(hdr.prot)
-            .map_err(|e| ParseError(format!("unsupported IP payload protocol, ver: {}", hdr.prot)))?;
+        Ipv4Prot::try_from(hdr.prot).map_err(|e| {
+            ParseError(format!(
+                "unsupported IP payload protocol, ver: {}",
+                hdr.prot
+            ))
+        })?;
 
         if !hdr.is_fragmented() {
             return Err(ParseError("fragmentation is not supported".into()));

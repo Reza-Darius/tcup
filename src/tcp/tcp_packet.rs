@@ -8,7 +8,7 @@ use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_HDR_SIZE, ETH_PAY_MAX_SIZE};
 use crate::ip::{IP_HDR_MINSIZE, IP_HDR_OFFSET, IPPROTO_TCP, IPv4Hdr};
 use crate::tcp::error::TCPError::{self, ParseError};
 use crate::tcp::opts::TCPOpts;
-use crate::tcp::service::TCPCon;
+use crate::tcp::sock::TCPCon;
 use crate::utils::calc_checksum_be;
 use crate::utils::packet::{IP, Packet, PacketBuf, TCP};
 
