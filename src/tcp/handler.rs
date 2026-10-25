@@ -1,12 +1,16 @@
+use std::assert_matches;
+
 use tracing::{debug, instrument};
 
 use super::error::TCPError;
 use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::tcp::error::TCPError::HandlerError;
 use crate::tcp::seq::*;
+use crate::tcp::skcb::TCPState::{Listen, SynReceived};
+use crate::tcp::tcp_packet::TCP_SEG_MAX_SIZE;
 use crate::tcp::{
     opts::TCPOpts,
-    skcb::{Open, SkCb, TCPEvent, TCPState},
+    skcb::{Open, SKCB, TCPState},
     tcp_packet::{TCPFlags, TCPHdr},
 };
 use crate::utils::packet::{Packet, TCP};
@@ -23,103 +27,123 @@ pub const SYN_ACK_RETRIES: u64 = 5;
 
 type Result<T> = std::result::Result<T, TCPError>;
 
-// pub async fn handle_tcp(inc: EthPacket, tcup: TCup) -> Result<()> {
-//     let ip_hdr = inc.get_ip_hdr()?;
-//     let tcp_hdr = inc.get_tcp_hdr()?;
-//
-//     let con = TCPCon {
-//         remote_ip: Ipv4Addr::from_octets(ip_hdr.src_addr),
-//         remote_port: tcp_hdr.sport,
-//         local_ip: Ipv4Addr::from_octets(ip_hdr.dest_addr),
-//         local_port: tcp_hdr.dport,
-//     };
-//
-//     // hand off segment
-//     let sock = tcup.get_sock(&con);
-//     let msg = SocketWorkerMsg::Frame(inc);
-//
-//     match sock {
-//         Some(sock) => sock.tx.send(msg).await.map_err(Into::into),
-//         None => {
-//             /*
-//             TODO: receiving message in CLOSED state
-//
-//             all data in the incoming segment is discarded. An incoming segment containing a RST is discarded. An incoming segment not containing a RST causes a RST to be sent in response. The acknowledgment and sequence field values are selected to make the reset sequence acceptable to the TCP endpoint that sent the offending segment.
-//             If the ACK bit is off, sequence number zero is used,
-//
-//             <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK>
-//             If the ACK bit is on,
-//
-//             <SEQ=SEG.ACK><CTL=RST>
-//             Return.
-//
-//             */
-//             warn!(?con, "cant find socket for connection");
-//             Err(Error::Tcp("cant find socket for connection".to_string()))
-//         }
-//     }
-// }
-
-// fn register_socket(tcup: TCup, con: TCPCon) -> Result<SkCb> {
-//     let sock = tcup.get_sock(&con);
-//
-//     if sock.is_some() {
-//         error!("attempted to register socket for existing connection");
-//         return Err(SocketError::SocketInUse(con).into());
-//     }
-//
-//     let (tx, rx) = channel::<SocketWorkerMsg>(CHAN_BUF_SIZE);
-//     tcup.insert_sock(&con, Socket { tx });
-//
-//     Ok(SkCb::new(rx, tcup.clone(), con))
-// }
-//
-// fn passive_open(mut skcb: SkCb) -> Result<()> {
-//     skcb.status = TCPState::Listen;
-//     skcb.open = Open::Passive;
-//
-//     tokio::spawn(dispatch(skcb));
-//
-//     Ok(())
-// }
-
-/// dispatch the correct handler based TCP status
+/// dispatch the correct handler for a segment event
 #[instrument(skip_all, fields(state = ?skcb.status))]
-pub async fn dispatch(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
-    if skcb.status == TCPState::Closed {
-        return Ok(());
-    }
-
+pub async fn seg_handler(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     // these behaviours are mostly the same across states so we can handle them right here
-    if let TCPEvent::Seg(ref seg) = event {
-        // what to do when we get a syn rst packet?
-        if skcb.drop_on_rst(seg) {
-            return Ok(());
-        };
-        // currently a noop
-        if skcb.drop_on_syn(seg) {
-            return Ok(());
-        }
-    }
+    // what to do when we get a syn rst packet?
+    let hdr = seg.hdr();
+
+    if handle_rst(skcb, hdr).await || handle_syn(skcb, hdr).await {
+        return Ok(());
+    };
 
     match skcb.status {
-        TCPState::Listen => listen(skcb, event).await?,
-        TCPState::SynSent => syn_sent(skcb, event).await?,
-        TCPState::SynReceived => syn_received(skcb, event).await?,
-        TCPState::Established => established(skcb, event).await?,
-        TCPState::FinWait1 => finwait1(skcb, event).await?,
-        TCPState::FinWait2 => finwait2(skcb, event).await?,
-        TCPState::CloseWait => close_wait(skcb, event).await?,
-        TCPState::Closing => closing(skcb, event).await?,
-        TCPState::LastAck => last_ack(skcb, event).await?,
-        TCPState::TimeWait => timewait(skcb, event).await?,
+        TCPState::Listen => listen(skcb, seg).await?,
+        TCPState::SynSent => syn_sent(skcb, seg).await?,
+        TCPState::SynReceived => syn_received(skcb, seg).await?,
+        TCPState::Established => established(skcb, seg).await?,
+        TCPState::FinWait1 => finwait1(skcb, seg).await?,
+        TCPState::FinWait2 => finwait2(skcb, seg).await?,
+        TCPState::CloseWait => close_wait(skcb, seg).await?,
+        TCPState::Closing => closing(skcb, seg).await?,
+        TCPState::LastAck => last_ack(skcb, seg).await?,
+        TCPState::TimeWait => timewait(skcb, seg).await?,
 
         TCPState::Closed => unreachable!(),
     };
     Ok(())
 }
 
-async fn active_open(skcb: &mut SkCb) -> Result<()> {
+/// determines whether the segment should be dropped and possible state change
+async fn handle_rst(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
+    if !hdr.is_rst() {
+        return false;
+    }
+    match skcb.status {
+        TCPState::SynSent => {
+            if skcb.check_ack(hdr) {
+                skcb.status = TCPState::Closed;
+                true
+            } else {
+                false
+            }
+        }
+        TCPState::TimeWait => {
+            skcb.status = TCPState::Closed;
+            true
+        }
+        TCPState::Listen | TCPState::Closed => true,
+        TCPState::SynReceived => {
+            match skcb.open {
+                Open::Passive => {
+                    skcb.status = TCPState::Listen;
+                }
+                // our connection was refused
+                Open::Active => {
+                    skcb.status = TCPState::Closed;
+                }
+            };
+            skcb.snd_buf.clear();
+            skcb.rcv_buf.clear();
+            true
+        }
+        _ => {
+            let seg_seq = hdr.seq.get();
+            if seq_gt(seg_seq, skcb.tcb.rcv_wnd) {
+                return true;
+            }
+            if seg_seq == skcb.tcb.rcv_nxt {
+                match skcb.open {
+                    Open::Passive => {
+                        skcb.status = TCPState::Listen;
+                    }
+                    // our connection was refused
+                    Open::Active => {
+                        skcb.status = TCPState::Closed;
+                    }
+                };
+                skcb.snd_buf.clear();
+                skcb.rcv_buf.clear();
+                return true;
+            };
+            /*
+            * If the RST bit is set and the sequence number does not exactly match the next expected sequence value, yet is within the current receive window, TCP endpoints MUST send an acknowledgment (challenge ACK):
+
+            <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
+
+            After sending the challenge ACK, TCP endpoints MUST drop the unacceptable segment and stop processing the incoming packet further. Note that RFC 5961 and Errata ID 4772 [99] contain additional considerations for ACK throttling in an implementation.
+            */
+            skcb.send_ack().await.unwrap();
+            true
+        }
+    }
+}
+
+/// returns true if the segment should be dropped
+async fn handle_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
+    if !hdr.is_syn() {
+        return false;
+    }
+    if matches!(skcb.status, TCPState::SynSent | SynReceived | Listen) {
+        // in synchronized state: send challenge ack and drop the segment
+        skcb.send_ack().await.unwrap();
+        true
+    } else {
+        false
+    }
+}
+
+/// response to connect call, actively opening a connection
+pub async fn active_open(skcb: &mut SKCB) -> Result<()> {
+    assert_matches!(
+        skcb.status,
+        TCPState::Closed,
+        "active open can only be called from closed state"
+    );
+
+    skcb.open = Open::Active;
+
     // configure initial sequence numbers
     skcb.tcb.iss = new_isn(&skcb.con);
     skcb.tcb.irs = 0;
@@ -143,6 +167,63 @@ async fn active_open(skcb: &mut SkCb) -> Result<()> {
     };
 
     let opts = TCPOpts {
+        mss: Some(TCP_SEG_MAX_SIZE as u16),
+        ..Default::default()
+    };
+
+    skcb.tcb.rcv_opts = opts;
+
+    tcp_hdr.set_syn();
+    skcb.output(tcp_hdr, opts, &[]).await?;
+
+    skcb.status = TCPState::SynSent;
+    skcb.open = Open::Active;
+
+    Ok(())
+}
+
+async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
+    let req_tcp_hdr = seg.hdr();
+
+    if req_tcp_hdr.is_ack() {
+        skcb.send_rst(req_tcp_hdr).await?;
+        return Err(HandlerError("ACK received".to_string()));
+    }
+
+    if req_tcp_hdr.is_fin() {
+        return Err(HandlerError("cant process fin segment".to_string()));
+    }
+
+    // probably unneccessary
+    if !req_tcp_hdr.is_syn() {
+        return Err(HandlerError("received seg without SYN".to_string()));
+    }
+
+    debug!("req TCP:\n{}", req_tcp_hdr);
+
+    // configure initial sequence numbers
+    skcb.tcb.iss = new_isn(&skcb.con);
+    skcb.tcb.irs = skcb.tcb.seg_seq;
+
+    // building SYN ACK response
+    // SYN consumes 1 seq number! seg_len = 1
+    skcb.tcb.rcv_nxt = skcb.tcb.seg_seq + 1;
+    skcb.tcb.rcv_wnd = WND_SIZE as u32;
+
+    skcb.tcb.snd_una = skcb.tcb.iss;
+    skcb.tcb.snd_nxt = skcb.tcb.iss + 1;
+
+    let mut tcp_hdr = TCPHdr {
+        sport: skcb.con.local_port.into(),
+        dport: skcb.con.remote_port.into(),
+        seq: skcb.tcb.iss.into(),
+        ack: skcb.tcb.rcv_nxt.into(), // ACKing the irs
+        flags: TCPFlags::default(),
+        win_size: WND_SIZE.into(),
+        ..Default::default()
+    };
+
+    let opts = TCPOpts {
         mss: Some(1460),
         ..Default::default()
     };
@@ -150,107 +231,41 @@ async fn active_open(skcb: &mut SkCb) -> Result<()> {
     skcb.tcb.rcv_opts = opts;
 
     tcp_hdr.set_syn();
+    tcp_hdr.set_ack();
     tcp_hdr.set_len(TCP_HDR_MINSIZE + opts.len());
 
     skcb.output(tcp_hdr, opts, &[]).await?;
-
-    skcb.status = TCPState::SynSent;
-    skcb.open = Open::Active;
-
-    // tokio::spawn(dispatch(skcb));
+    skcb.status = TCPState::SynReceived;
 
     Ok(())
 }
 
-async fn listen(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
-    match event {
-        TCPEvent::Seg(seg) => {
-            let req_tcp_hdr = seg.hdr();
-
-            if req_tcp_hdr.is_ack() {
-                skcb.send_rst(req_tcp_hdr).await?;
-                return Err(HandlerError("ACK received".to_string()));
-            }
-
-            if req_tcp_hdr.is_fin() {
-                return Err(HandlerError("cant process fin segment".to_string()));
-            }
-
-            // probably unneccessary
-            if !req_tcp_hdr.is_syn() {
-                return Err(HandlerError("received seg without SYN".to_string()));
-            }
-
-            debug!("req TCP:\n{}", req_tcp_hdr);
-
-            // configure initial sequence numbers
-            skcb.tcb.iss = new_isn(&skcb.con);
-            skcb.tcb.irs = skcb.tcb.seg_seq;
-
-            // building SYN ACK response
-            // SYN consumes 1 seq number! seg_len = 1
-            skcb.tcb.rcv_nxt = skcb.tcb.seg_seq + 1;
-            skcb.tcb.rcv_wnd = WND_SIZE as u32;
-
-            skcb.tcb.snd_una = skcb.tcb.iss;
-            skcb.tcb.snd_nxt = skcb.tcb.iss + 1;
-
-            let mut tcp_hdr = TCPHdr {
-                sport: skcb.con.local_port.into(),
-                dport: skcb.con.remote_port.into(),
-                seq: skcb.tcb.iss.into(),
-                ack: skcb.tcb.rcv_nxt.into(), // ACKing the irs
-                flags: TCPFlags::default(),
-                win_size: WND_SIZE.into(),
-                ..Default::default()
-            };
-
-            let opts = TCPOpts {
-                mss: Some(1460),
-                ..Default::default()
-            };
-
-            skcb.tcb.rcv_opts = opts;
-
-            tcp_hdr.set_syn();
-            tcp_hdr.set_ack();
-            tcp_hdr.set_len(TCP_HDR_MINSIZE + opts.len());
-
-            skcb.output(tcp_hdr, opts, &[]).await?;
-            skcb.status = TCPState::SynReceived;
-
-            Ok(())
-        }
-        _ => todo!(),
-    }
-}
-
 /// event handler for SYN SENT TCP state
-async fn syn_sent(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
+async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     todo!()
 }
 
 /// event handler for FIN WAIT1 TCP state
-async fn finwait1(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
+async fn finwait1(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     todo!()
 }
 
 /// event handler for FIN WAIT2 TCP state
-async fn finwait2(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
+async fn finwait2(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     todo!()
 }
 
 /// event handler for CLOSING TCP state
-async fn closing(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
+async fn closing(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     todo!()
 }
 
 /// event handler for TIME WAIT TCP state
-async fn timewait(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
-    match event {
-        TCPEvent::Timeout => skcb.status = TCPState::Closed,
-        _ => todo!(),
-    }
+async fn timewait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
+    // match event {
+    //     TCPEvent::Timeout => skcb.status = TCPState::Closed,
+    //     _ => todo!(),
+    // }
     Ok(())
 }
 
@@ -273,91 +288,89 @@ async fn timewait(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
 */
 
 /// event handler for SYN RECEIVED TCP state
-async fn syn_received(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
-    match event {
-        TCPEvent::Seg(seg) => {
-            skcb.check_seg().await?;
-            let hdr = seg.hdr();
-            if hdr.is_rst() {
-                skcb.rcv_buf.clear();
-                skcb.status = TCPState::Listen;
-                return Err(HandlerError(
-                    "RST received, returning to listen".to_string(),
-                ));
-            }
+async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
+    skcb.check_seg().await?;
+    let hdr = seg.hdr();
+    if hdr.is_rst() {
+        skcb.rcv_buf.clear();
 
-            if hdr.is_syn() {
-                skcb.status = TCPState::Closed;
-                return Err(HandlerError(
-                    "SYN packet received, terminating connection".to_string(),
-                ));
-            }
+        // If this connection was initiated with a passive OPEN (i.e., came from the LISTEN state),
+        // then return this connection to LISTEN state and return. The user need not be informed.
+        // If this connection was initiated with an active OPEN (i.e., came from SYN-SENT state),
+        // then the connection was refused; signal the user "connection refused".
+        // In either case, the retransmission queue should be flushed.
+        // And in the active OPEN case, enter the CLOSED state and delete the TCB, and return.
 
-            if !hdr.is_ack() {
-                skcb.status = TCPState::Closed;
-                return Err(HandlerError(
-                    "no ACK set, terminating connection".to_string(),
-                ));
-            }
+        skcb.status = match skcb.open {
+            Open::Passive => TCPState::Listen,
+            Open::Active => TCPState::Closed,
+        };
 
-            // SND.UNA < SEG.ACK <= SND.NXT
-            if seq_lt(skcb.tcb.snd_una, skcb.tcb.seg_ack)
-                && seq_lte(skcb.tcb.seg_ack, skcb.tcb.snd_nxt)
-            {
-                // ACK packets dont carry data so the windows doesnt advance
-                skcb.tcb.snd_wnd = skcb.tcb.seg_wnd as u32;
-                skcb.tcb.snd_wl1 = skcb.tcb.seg_seq;
-                skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
+        return Err(HandlerError(format!(
+            "RST received, returning to {:?}",
+            skcb.status
+        )));
+    }
 
-                // If an MSS Option is not received at connection setup, TCP implementations MUST assume a default send MSS of 536 (576 - 40) for IPv4 or 1220 (1280 - 60) for IPv6 (MUST-15).
-                skcb.tcb.snd_opts = seg.options().unwrap_or_else(|| TCPOpts {
-                    mss: Some(536),
-                    ..Default::default()
-                });
+    if hdr.is_syn() {
+        skcb.status = TCPState::Closed;
+        return Err(HandlerError(
+            "SYN packet received, terminating connection".to_string(),
+        ));
+    }
 
-                debug!("connection established!");
-                skcb.status = TCPState::Established;
+    if !hdr.is_ack() {
+        skcb.status = TCPState::Closed;
+        return Err(HandlerError(
+            "no ACK set, terminating connection".to_string(),
+        ));
+    }
 
-                // TODO: place any data that accompanies this ack into the buffer
-                return Ok(());
-            } else {
-                let mut tcp_hdr = TCPHdr {
-                    sport: skcb.con.local_port.into(),
-                    dport: skcb.con.remote_port.into(),
-                    seq: skcb.tcb.seg_ack.into(),
-                    ack: skcb.tcb.rcv_nxt.into(),
-                    flags: TCPFlags::default(),
-                    win_size: WND_SIZE.into(),
-                    ..Default::default()
-                };
+    // SND.UNA < SEG.ACK <= SND.NXT
+    if seq_lt(skcb.tcb.snd_una, skcb.tcb.seg_ack) && seq_lte(skcb.tcb.seg_ack, skcb.tcb.snd_nxt) {
+        // ACK packets dont carry data so the windows doesnt advance
+        skcb.tcb.snd_wnd = skcb.tcb.seg_wnd as u32;
+        skcb.tcb.snd_wl1 = skcb.tcb.seg_seq;
+        skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
 
-                tcp_hdr.set_rst();
-                tcp_hdr.set_len(TCP_HDR_MINSIZE);
+        // If an MSS Option is not received at connection setup, TCP implementations MUST assume a default send MSS of 536 (576 - 40) for IPv4 or 1220 (1280 - 60) for IPv6 (MUST-15).
+        skcb.tcb.snd_opts = seg.options().unwrap_or_else(|| TCPOpts {
+            mss: Some(536),
+            ..Default::default()
+        });
 
-                skcb.output(tcp_hdr, TCPOpts::default(), &[]).await?;
-            }
+        debug!("connection established!");
+        skcb.status = TCPState::Established;
 
-            if hdr.is_fin() {
-                skcb.tcb.rcv_nxt += 1;
-                skcb.status = TCPState::CloseWait;
-                skcb.send_ack().await?;
-            }
-        }
-        _ => todo!(),
+        // TODO: place any data that accompanies this ack into the buffer
+        return Ok(());
+    } else {
+        let mut tcp_hdr = TCPHdr {
+            sport: skcb.con.local_port.into(),
+            dport: skcb.con.remote_port.into(),
+            seq: skcb.tcb.seg_ack.into(),
+            ack: skcb.tcb.rcv_nxt.into(),
+            flags: TCPFlags::default(),
+            win_size: WND_SIZE.into(),
+            ..Default::default()
+        };
+
+        tcp_hdr.set_rst();
+        tcp_hdr.set_len(TCP_HDR_MINSIZE);
+
+        skcb.output(tcp_hdr, TCPOpts::default(), &[]).await?;
+    }
+
+    if hdr.is_fin() {
+        skcb.tcb.rcv_nxt += 1;
+        skcb.status = TCPState::CloseWait;
+        skcb.send_ack().await?;
     }
     Ok(())
 }
 
-/// event handler for ESTABLISHED TCP state
-async fn established(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
-    match event {
-        TCPEvent::Seg(seg) => established_seg(skcb, seg).await,
-        _ => todo!(),
-    }
-}
-
-/// handler for segment event in ESTABLISHED TCP state
-async fn established_seg(skcb: &mut SkCb, seg: Packet<TCP>) -> Result<()> {
+/// handler for segment event in ESTABLISHED state
+async fn established(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     skcb.check_seg().await?;
     let seg_hdr = seg.hdr();
 
@@ -386,7 +399,7 @@ async fn established_seg(skcb: &mut SkCb, seg: Packet<TCP>) -> Result<()> {
     // check for snd window = seg window, advertised window hasnt changed
     if seq_lt(snd_una, seg_ack) && seq_lte(seg_ack, snd_nxt) {
         // we got an ACK within our send window, we can move it forward
-       
+
         // - pop data from sendbuffer/retransmission queue
         skcb.snd_buf.free_n(snd_una.abs_diff(seg_ack) as usize);
 
@@ -415,8 +428,12 @@ async fn established_seg(skcb: &mut SkCb, seg: Packet<TCP>) -> Result<()> {
 
     // segment is next expected data so we move the window
     if skcb.tcb.seg_seq == skcb.tcb.rcv_nxt {
+        // TODO: consume the package to avoid another allocation
         let seg_data = seg.payload();
+
         debug!("got {} bytes of data, advancing rcv_nxt", seg_data.len());
+        debug_assert!(seg_data.len() as u32 == skcb.tcb.seg_len);
+
         let rcv_nxt = skcb.tcb.rcv_nxt;
         skcb.rcv_buf.insert(seg_data, rcv_nxt);
 
@@ -445,7 +462,7 @@ async fn established_seg(skcb: &mut SkCb, seg: Packet<TCP>) -> Result<()> {
 async fn established_send() {}
 
 /// event handler for CLOSE WAIT TCP state
-async fn close_wait(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
+async fn close_wait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     // TODO: send remaining data
 
     // sending our own FIN
@@ -471,20 +488,12 @@ async fn close_wait(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     Ok(())
 }
 
-async fn last_ack(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
+async fn last_ack(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     // waiting for our FIN to be ACKed before closing
-    match event {
-        TCPEvent::Seg(seg) => {
-            if skcb.check_ack(seg.hdr()) {
-                skcb.status = TCPState::Closed;
-                Ok(())
-            } else {
-                Err(HandlerError("invalid ACK".to_string()))
-            }
-        }
-        TCPEvent::Timeout => todo!(),
-        TCPEvent::Send(items) => todo!(),
-        TCPEvent::Close => todo!(),
-        TCPEvent::Abort => todo!(),
+    if skcb.check_ack(seg.hdr()) {
+        skcb.status = TCPState::Closed;
+        Ok(())
+    } else {
+        Err(HandlerError("invalid ACK".to_string()))
     }
 }

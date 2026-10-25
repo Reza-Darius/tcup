@@ -80,6 +80,7 @@ bitflags::bitflags! {
 
         /// Union of SYN and ACK field
         const SYNACK = Self::SYN.bits() | Self::ACK.bits();
+        const RSTACK = Self::RST.bits() | Self::ACK.bits();
     }
 }
 

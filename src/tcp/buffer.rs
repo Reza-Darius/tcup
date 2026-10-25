@@ -31,6 +31,7 @@ impl SendBuf {
     }
 
     /// retrieve N bytes of new data, does not move up the cursor
+    ///
     /// never gives out more than TCP_SEG_MAX_SIZE bytes
     pub fn get_new_seg(&self, len: usize) -> Option<&[u8]> {
         if self.count == self.data.len() {
@@ -69,7 +70,7 @@ impl SendBuf {
         self.data.is_empty()
     }
 
-    fn clear(&mut self) {
+    pub fn clear(&mut self) {
         if self.count == self.data.len() {
             self.data.clear();
             self.count = 0;
@@ -97,17 +98,17 @@ impl RecvBuf {
         seq.wrapping_sub(self.base)
     }
 
-    pub fn insert(&mut self, data: impl AsRef<[u8]>, seq: u32) {
+    pub fn insert(&mut self, data: impl Into<Vec<u8>>, seq: u32) {
         if self.data.is_empty() {
             self.base = seq;
         }
 
         match self.data.entry(self.key(seq)) {
             std::collections::btree_map::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert_entry(data.as_ref().to_vec());
+                vacant_entry.insert_entry(data.into());
             }
             std::collections::btree_map::Entry::Occupied(mut occupied_entry) => {
-                let data = data.as_ref();
+                let data = data.into();
                 if occupied_entry.get().len() < data.len() {
                     occupied_entry.insert(data.to_vec());
                 };
@@ -151,7 +152,8 @@ impl RecvBuf {
 
         // we have to do this cause the above loop borrows the map immutably ugh
         for n in clean_up.iter() {
-            self.data.remove(n);
+            let r = self.data.remove(n);
+            debug_assert!(r.is_some());
         }
 
         Some(data)

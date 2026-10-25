@@ -1,6 +1,5 @@
-/*
-* Top level definitions for packets
-*/
+// Top level definitions for packets
+
 use std::marker::PhantomData;
 
 /// a packet generic over supported protocols
@@ -76,30 +75,6 @@ pub trait PacketBuf {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-}
-
-pub trait NetworkPacket<Packet>
-where
-    Self: Sized,
-    Self::Error: std::error::Error,
-{
-    type Header;
-    type Payload;
-    type Error;
-
-    /// parses a buffer, returning the packet on success
-    fn parse(data: Packet) -> Result<Self, Self::Error>;
-
-    /// build a new packet
-    fn build(header: Self::Header, payload: Self::Payload) -> Self;
-
-    /// splits up a packet into a lower-level packet
-    ///
-    /// this fucntion will generally call [`NetworkPacket::parse()`] on the underlying packet
-    fn into_parts(self) -> Result<(Self::Header, Self::Payload), Self::Error>;
-
-    fn hdr(&self) -> &Self::Header;
-    fn payload(&self) -> &[u8];
 }
 
 /// marker trait for supported protocols

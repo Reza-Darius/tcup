@@ -9,7 +9,8 @@ use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::ip::IPv4Hdr;
 use crate::tcp::buffer::{RecvBuf, SendBuf};
 use crate::tcp::error::TCPError::{self, SKCBError};
-use crate::tcp::handler::dispatch;
+use crate::tcp::handler::seg_handler;
+use crate::tcp::skcb::TCPState::{Listen, SynReceived};
 use crate::tcp::{
     opts::TCPOpts,
     rto::RTO,
@@ -32,33 +33,33 @@ type Result<T> = std::result::Result<T, TCPError>;
 
 // this is just a wrapper, see below for the real meat and potatoes
 #[derive(Debug)]
-pub struct SkCb {
-    inner: Box<SkCbInner>,
+pub struct SKCB {
+    inner: Box<SKCBInner>,
 }
 
-impl Deref for SkCb {
-    type Target = SkCbInner;
+impl Deref for SKCB {
+    type Target = SKCBInner;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
 
-impl DerefMut for SkCb {
+impl DerefMut for SKCB {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
 #[derive(Debug)]
-pub struct SkCbInner {
+pub struct SKCBInner {
     pub con: TCPCon,
     pub status: TCPState,
     pub tcb: Tcb,
     pub open: Open,
 
     /// communication channel for receiving TCP data and user calls
-    pub in_chan: Receiver<TCBMessage>,
+    pub in_chan: Receiver<SocketMessage>,
     /// sender for giving out IP packets to be handled by lower layer
     pub out_chan: Sender<Packet<IP>>,
 
@@ -74,10 +75,10 @@ pub enum Open {
     Active,
 }
 
-impl SkCb {
-    pub fn new(rx: Receiver<TCBMessage>, tx: Sender<Packet<IP>>, con: TCPCon) -> Self {
-        SkCb {
-            inner: Box::new(SkCbInner {
+impl SKCB {
+    pub(super) fn new(rx: Receiver<SocketMessage>, tx: Sender<Packet<IP>>, con: TCPCon) -> Self {
+        SKCB {
+            inner: Box::new(SKCBInner {
                 tcb: Tcb::default(),
                 open: Open::Passive,
 
@@ -89,6 +90,59 @@ impl SkCb {
                 status: TCPState::Closed,
                 con,
             }),
+        }
+    }
+
+    /// event loop listening for user calls, data segments and timers
+    pub async fn run(mut self) -> Result<()> {
+        // we need to linger after closing the socket before reopening it as to not confuse
+        // packets for the old connection
+        //
+        // maybe we need some way to circumvent this?
+        if matches!(self.status, TCPState::TimeWait) {
+            tokio::time::sleep(Duration::new(TIME_WAIT, 0)).await;
+            return Ok(());
+        }
+
+        loop {
+            if matches!(self.status, TCPState::Closed) {
+                return Ok(());
+            }
+
+            // TODO: we probably want to poll the timoeut first
+            tokio::select! {
+                res = self.inner.in_chan.recv() => {
+                    trace!("message recieved");
+                    let msg = res.expect("assert: the channel cant be closed");
+                    if let Err(e) = self.handle_user_call(msg).await {
+                        error!(%e);
+                    };
+                }
+                _ = &mut self.inner.tcb.rto => {
+                    // self.inner.tcb.rto.clear();
+                    trace!("RTO expired");
+                }
+            }
+        }
+    }
+
+    async fn handle_user_call(&mut self, message: SocketMessage) -> Result<()> {
+        let event = match message {
+            SocketMessage::Close => todo!(),
+            SocketMessage::Segment(packet) => {
+                self.update_tcb(&packet);
+                TCPEvent::Seg(packet)
+            }
+            SocketMessage::Receive(sender) => todo!(),
+            SocketMessage::Send(data) => todo!(),
+        };
+
+        match event {
+            TCPEvent::Timeout => todo!(),
+            TCPEvent::Seg(packet) => seg_handler(self, packet).await,
+            TCPEvent::Send(items) => todo!(),
+            TCPEvent::Close => todo!(),
+            TCPEvent::Abort => todo!(),
         }
     }
 
@@ -132,7 +186,13 @@ impl SkCb {
     }
 
     /// sends a packet out through the open connection
-    pub async fn output(&self, tcp_hdr: TCPHdr, opts: TCPOpts, tcp_pay: &[u8]) -> Result<()> {
+    pub(super) async fn output(
+        &self,
+        tcp_hdr: TCPHdr,
+        opts: TCPOpts,
+        tcp_pay: &[u8],
+    ) -> Result<()> {
+        // TODO: maybe we send outstanding data here?
         let packet = Packet::<TCP>::new(
             self.con.local_ip,
             self.con.remote_ip,
@@ -145,7 +205,9 @@ impl SkCb {
     }
 
     /// sends a naked ack based on current control block values
-    pub async fn send_ack(&self) -> Result<()> {
+    ///
+    /// can also serve as challenge ack?
+    pub(super) async fn send_ack(&self) -> Result<()> {
         trace!("sending ack");
 
         // TODO: aggregate ACKs
@@ -166,7 +228,7 @@ impl SkCb {
         self.output(tcp_hdr, TCPOpts::default(), &[]).await
     }
 
-    pub async fn send_rst(&self, tcp_hdr: &TCPHdr) -> Result<()> {
+    pub(super) async fn send_rst(&self, tcp_hdr: &TCPHdr) -> Result<()> {
         trace!("sending reset");
 
         let inner = &self.inner;
@@ -204,7 +266,7 @@ impl SkCb {
     }
 
     /// checks for acceptable ACK
-    pub fn check_ack(&self, tcp_hdr: &TCPHdr) -> bool {
+    pub(super) fn check_ack(&self, tcp_hdr: &TCPHdr) -> bool {
         if !tcp_hdr.is_ack() {
             return true;
         }
@@ -218,23 +280,20 @@ impl SkCb {
         seq_lt(snd_una, seg_ack) && seq_lte(seg_ack, snd_nxt)
     }
 
-    /*
-    Segment Receive  Test
-    Length  Window
-    ------- -------  -------------------------------------------
-
-       0       0     SEG.SEQ = RCV.NXT
-
-       0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
-
-      >0       0     not acceptable
-
-      >0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
-                  or RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
-    */
-
+    // Segment Receive  Test
+    // Length  Window
+    // ------- -------  -------------------------------------------
+    //
+    //    0       0     SEG.SEQ = RCV.NXT
+    //
+    //    0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
+    //
+    //   >0       0     not acceptable
+    //
+    //   >0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
+    //               or RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
     /// checks for acceptable segment, and sends a reply
-    pub async fn check_seg(&self) -> Result<()> {
+    pub(super) async fn check_seg(&self) -> Result<()> {
         match self.status {
             TCPState::Listen | TCPState::SynSent => {
                 panic!("seg check triggered in unacceptable state")
@@ -275,55 +334,6 @@ impl SkCb {
         }
     }
 
-    /// event loop listening for user calls, data segments and timers
-    pub async fn run(mut self) -> Result<()> {
-        // we need to linger after closing the socket before reopening it as to not confuse
-        // packets for the old connection
-        //
-        // maybe we need some way to circumvent this?
-        if self.status == TCPState::TimeWait {
-            tokio::time::sleep(Duration::new(TIME_WAIT, 0)).await;
-            return Ok(());
-        }
-
-        loop {
-            tokio::select! {
-                res = self.inner.in_chan.recv() => {
-                    trace!("message recieved");
-                    let msg = res.expect("assert: the channel cant be closed");
-
-                    match self.handle_user_call(msg) {
-                        Ok(event) => {
-                            if let Err(e) = dispatch(&mut self, event).await {
-                                error!(%e);
-                            };
-                        },
-                        Err(e) => {
-                            error!(?e, "event rcv error");
-                            continue;
-                        }
-                    }
-                }
-                _ = &mut self.inner.tcb.rto => {
-                    trace!("RTO expired");
-                }
-            }
-        }
-    }
-
-    fn handle_user_call(&mut self, message: TCBMessage) -> Result<TCPEvent> {
-        match message {
-            TCBMessage::Close => todo!(),
-            TCBMessage::Segment(packet) => {
-                self.update_tcb(&packet);
-                Ok(TCPEvent::Seg(packet))
-            }
-            TCBMessage::Receive(sender) => todo!(),
-            TCBMessage::Status => todo!(),
-            TCBMessage::Send(data) => todo!(),
-        }
-    }
-
     // pub fn update_rto(&mut self, seg: &TCPSegment) -> Result<()> {
     //     // we only update RTQ/RTO if the segment advances the windows (SND.UNA) and is ack
     //     match self.status {
@@ -339,90 +349,6 @@ impl SkCb {
     //     // dont take measurement
     //     Ok(())
     // }
-
-    /// return true if the loop should skip, i.e the segment gets dropped
-    pub fn drop_on_rst(&mut self, seg: &Packet<TCP>) -> bool {
-        let hdr = seg.hdr();
-        if !hdr.is_rst() {
-            return false;
-        }
-        match self.status {
-            TCPState::SynSent => {
-                if self.check_ack(hdr) {
-                    self.status = TCPState::Closed;
-                    false // we drop the segment, but through the loop we cancel
-                } else {
-                    true
-                }
-            }
-            TCPState::Listen | TCPState::Closed => true,
-            TCPState::SynReceived => {
-                match self.open {
-                    Open::Passive => {
-                        self.status = TCPState::Listen;
-                        // TODO: flush buffer
-                        true
-                    }
-                    // our connection was refused
-                    Open::Active => {
-                        self.status = TCPState::Closed;
-                        // TODO: flush buffer
-                        true
-                    }
-                }
-            }
-            _ => {
-                let seg_seq = hdr.seq.get();
-                if seq_gt(seg_seq, self.tcb.rcv_wnd) {
-                    return true;
-                }
-                if seg_seq == self.tcb.rcv_nxt {
-                    match self.open {
-                        Open::Passive => {
-                            self.status = TCPState::Listen;
-                            // TODO: flush buffer
-                            return true;
-                        }
-                        // our connection was refused
-                        Open::Active => {
-                            self.status = TCPState::Closed;
-                            // TODO: flush buffer
-                            return true;
-                        }
-                    }
-                };
-                true
-                /*
-                * If the RST bit is set and the sequence number does not exactly match the next expected sequence value, yet is within the current receive window, TCP endpoints MUST send an acknowledgment (challenge ACK):
-
-                <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
-
-                After sending the challenge ACK, TCP endpoints MUST drop the unacceptable segment and stop processing the incoming packet further. Note that RFC 5961 and Errata ID 4772 [99] contain additional considerations for ACK throttling in an implementation.
-                */
-            }
-        }
-    }
-
-    /// returns true if the segment should be dropped
-    pub fn drop_on_syn(&mut self, seg: &Packet<TCP>) -> bool {
-        false
-        // if !seg.hdr.check_syn() {
-        //     return false;
-        // }
-        // match self.status {
-        //     TCPState::SynSent => todo!(),
-        //     TCPState::SynReceived => todo!(),
-        //     TCPState::Established => todo!(),
-        //     TCPState::FinWait1 => todo!(),
-        //     TCPState::FinWait2 => todo!(),
-        //     TCPState::CloseWait => todo!(),
-        //     TCPState::Closing => todo!(),
-        //     TCPState::LastAck => todo!(),
-        //     TCPState::Listen => todo!(),
-        //     TCPState::TimeWait => todo!(),
-        //     TCPState::Closed => todo!(),
-        // }
-    }
 
     pub fn clear_rto(&mut self) {
         // TODO: impl
@@ -506,7 +432,7 @@ impl std::fmt::Display for Tcb {
 }
 
 // https://datatracker.ietf.org/doc/html/rfc9293#name-state-machine-overview
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum TCPState {
     SynSent,
     SynReceived,
