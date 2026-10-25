@@ -7,7 +7,7 @@ use tracing::{error, trace, warn};
 use super::sock::TCPCon;
 use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::ip::IPv4Hdr;
-use crate::tcp::buffer::{RcvBuf, SendBuf};
+use crate::tcp::buffer::{RecvBuf, SendBuf};
 use crate::tcp::error::TCPError::{self, SKCBError};
 use crate::tcp::handler::dispatch;
 use crate::tcp::{
@@ -65,7 +65,7 @@ pub struct SkCbInner {
     /// buffer for outgoing data
     pub snd_buf: SendBuf,
     /// buffer for incoming data
-    pub rcv_buf: RcvBuf,
+    pub rcv_buf: RecvBuf,
 }
 
 #[derive(Debug)]
@@ -85,11 +85,22 @@ impl SkCb {
                 out_chan: tx,
 
                 snd_buf: SendBuf::new(SND_RCV_BUF_SIZE),
-                rcv_buf: RcvBuf::new(SND_RCV_BUF_SIZE),
-                // rt_queue: RTQ(VecDeque::new()),
+                rcv_buf: RecvBuf::new(SND_RCV_BUF_SIZE),
                 status: TCPState::Closed,
                 con,
             }),
+        }
+    }
+
+    fn hdr_t(&self) -> TCPHdr {
+        TCPHdr {
+            sport: self.con.local_port.into(),
+            dport: self.con.remote_port.into(),
+            seq: self.tcb.snd_nxt.into(),
+            ack: self.tcb.rcv_nxt.into(),
+            flags: TCPFlags::default(),
+            win_size: WND_SIZE.into(),
+            ..Default::default()
         }
     }
 
@@ -411,6 +422,10 @@ impl SkCb {
         //     TCPState::TimeWait => todo!(),
         //     TCPState::Closed => todo!(),
         // }
+    }
+
+    pub fn clear_rto(&mut self) {
+        // TODO: impl
     }
 }
 

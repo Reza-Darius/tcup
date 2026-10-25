@@ -12,7 +12,7 @@ pub const FIN_TIMEOUT: u64 = 60; // seconds
 /// granularity of the clock, the linux kernel uses 200ms and 500ms
 pub const CLOCK_GRAN: u64 = 100; // miliseconds
 
-pub fn start_clock() {
+fn start_clock() {
     tokio::spawn(async {
         let mut int = tokio::time::interval(Duration::from_millis(CLOCK_GRAN));
         loop {

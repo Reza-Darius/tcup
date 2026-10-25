@@ -20,6 +20,7 @@ pub const TCP_OPT_MAX_SIZE: usize = TCP_HDR_MAXSIZE - TCP_HDR_MINSIZE;
 pub const TCP_HDR_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE as usize;
 const TCP_CHECK_OFFSET_FROM_HDR: usize = 16;
 pub const TCP_HDR_DOF_OFF: usize = 12;
+pub const TCP_SEG_MAX_SIZE: usize = ETH_PAY_MAX_SIZE - IP_HDR_MINSIZE as usize - TCP_HDR_MINSIZE;
 
 /// minimum offset
 const TCP_PAY_OFFSET: usize = ETH_HDR_SIZE + IP_HDR_MINSIZE as usize + TCP_HDR_MINSIZE;

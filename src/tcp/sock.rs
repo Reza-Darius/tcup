@@ -1,7 +1,12 @@
 use std::net::Ipv4Addr;
+use futures::channel::mpsc::Sender;
 use tokio::sync::oneshot;
 
 use crate::utils::packet::{Packet, TCP};
+
+pub fn alloc_socket() -> Sender<TCBMessage> {
+    todo!()
+}
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TCPCon {
@@ -14,10 +19,9 @@ pub struct TCPCon {
 /// user facing interface
 #[derive(Debug)]
 pub enum SocketCall {
-    Open((Ipv4Addr, u16)),
     Connect((Ipv4Addr, u16)),
     Listen((Ipv4Addr, u16)),
-    Close((Ipv4Addr, u16)),
+    Close,
 
     Send(Vec<u8>),
     Receive(oneshot::Sender<Vec<u8>>),
@@ -31,9 +35,11 @@ pub enum SocketCall {
 pub enum TCBMessage {
     /// user calls
     Close,
-    Segment(Packet<TCP>),
-    Receive(oneshot::Sender<Vec<u8>>),
-    Status,
+
     /// incoming segment
     Send(Vec<u8>),
+    Receive(oneshot::Sender<Vec<u8>>),
+    Segment(Packet<TCP>),
+
+    Status,
 }

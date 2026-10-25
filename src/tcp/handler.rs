@@ -119,7 +119,7 @@ pub async fn dispatch(skcb: &mut SkCb, event: TCPEvent) -> Result<()> {
     Ok(())
 }
 
-async fn active_open(mut skcb: SkCb) -> Result<()> {
+async fn active_open(skcb: &mut SkCb) -> Result<()> {
     // configure initial sequence numbers
     skcb.tcb.iss = new_isn(&skcb.con);
     skcb.tcb.irs = 0;
@@ -385,15 +385,21 @@ async fn established_seg(skcb: &mut SkCb, seg: Packet<TCP>) -> Result<()> {
     }
     // check for snd window = seg window, advertised window hasnt changed
     if seq_lt(snd_una, seg_ack) && seq_lte(seg_ack, snd_nxt) {
-        // we got an ACK within our send window
-        // we can move the send window forward
-        // TODO::
+        // we got an ACK within our send window, we can move it forward
+       
         // - pop data from sendbuffer/retransmission queue
+        skcb.snd_buf.free_n(snd_una.abs_diff(seg_ack) as usize);
+
         // - If the received segment acknowledges all outstanding data (snd_una equals snd_max), the
         //   retransmission timer is turned off. Otherwise, if the persist timer is off, the retransmit timer is restarted
-        // - if the buffer has been fully acknowledged, return OK response to user
-        skcb.snd_buf.free_n(snd_una.abs_diff(seg_ack) as usize);
+        if skcb.snd_buf.is_empty() {
+            skcb.clear_rto();
+        }
+
         skcb.tcb.snd_una = seg_ack;
+
+        // TODO::
+        // - if the buffer has been fully acknowledged, return OK response to user
 
         // update window
         if seq_lt(skcb.tcb.snd_wl1, seg_seq)
