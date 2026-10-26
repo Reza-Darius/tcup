@@ -23,29 +23,6 @@ pub fn calc_checksum_be(bytes: &[u8]) -> u16 {
     !sum as u16
 }
 
-// pub fn calc_checksum_le(bytes: &[u8]) -> u16 {
-//     let mut sum: u32 = 0;
-//     let mut i = 0;
-
-//     while i + 1 < bytes.len() {
-//         let word = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
-//         sum += word as u32;
-//         i += 2;
-//     }
-
-//     if i < bytes.len() {
-//         sum += (bytes[i] as u32) << 8;
-//     }
-
-//     while (sum >> 16) > 0 {
-//         sum = (sum & 0xFFFF) + (sum >> 16);
-//     }
-
-//     sum = sum.swap_bytes();
-//     !sum as u16
-// }
-//
-
 /// from 24 to 255.255.255.0
 pub fn cidr_to_mask(subnet: u8) -> u32 {
     assert!(subnet != 0);

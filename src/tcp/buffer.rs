@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 
+use tracing::warn;
+
 use crate::tcp::{error::TCPError, tcp_packet::TCP_SEG_MAX_SIZE};
 
 #[derive(Debug, Default)]
 pub struct SendBuf {
     data: Vec<u8>,
-    /// counter from the left side to track popped data
+    /// counter from the left side to track in-flight data
     /// this should correspond to snd_nxt - snd_una
     count: usize,
 }
@@ -30,10 +32,10 @@ impl SendBuf {
         Ok(())
     }
 
-    /// retrieve N bytes of new data, does not move up the cursor
+    /// retrieve N bytes of new data
     ///
     /// never gives out more than TCP_SEG_MAX_SIZE bytes
-    pub fn get_new_seg(&self, len: usize) -> Option<&[u8]> {
+    pub fn get_new_seg(&mut self, len: usize) -> Option<&[u8]> {
         if self.count == self.data.len() {
             return None;
         }
@@ -44,10 +46,14 @@ impl SendBuf {
         let hi = lo + usize::min(lo, TCP_SEG_MAX_SIZE);
 
         let out_slice = &self.data[lo..hi];
+
+        self.count += hi - lo;
         Some(out_slice)
     }
 
     /// retreives data until cursor
+    ///
+    /// never gives out more than TCP_SEG_MAX_SIZE bytes
     pub fn get_last_seg(&self) -> Option<&[u8]> {
         if self.data.is_empty() {
             return None;
@@ -58,7 +64,7 @@ impl SendBuf {
     }
 
     /// mark len bytes as ACKd, moving up the cursor
-    pub fn free_n(&mut self, len: usize) {
+    pub fn free(&mut self, len: usize) {
         assert!(self.count + len <= self.data.len());
         self.count += len;
         if self.count == self.data.len() {
@@ -84,13 +90,17 @@ pub struct RecvBuf {
     // we rely on the invariance that we never buffer more than u32::MAX amount of data
     base: u32,
     data: BTreeMap<u32, Vec<u8>>,
+    n_bytes: u16, // amount of bytes allocated for tracking our buffer
+    cap: u16,
 }
 
 impl RecvBuf {
-    pub fn new(_: usize) -> Self {
+    pub fn new(cap: usize) -> Self {
         RecvBuf {
             base: 0,
             data: BTreeMap::new(),
+            n_bytes: 0,
+            cap: cap as u16,
         }
     }
 
@@ -103,14 +113,22 @@ impl RecvBuf {
             self.base = seq;
         }
 
+        let data = data.into();
+        assert!((self.n_bytes + data.len() as u16) < self.cap);
+
         match self.data.entry(self.key(seq)) {
             std::collections::btree_map::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert_entry(data.into());
+                self.n_bytes += data.len() as u16;
+
+                vacant_entry.insert_entry(data);
             }
             std::collections::btree_map::Entry::Occupied(mut occupied_entry) => {
-                let data = data.into();
-                if occupied_entry.get().len() < data.len() {
-                    occupied_entry.insert(data.to_vec());
+                let d_len = data.len() as u16;
+                let old_len = occupied_entry.get().len() as u16;
+
+                if old_len < d_len {
+                    occupied_entry.insert(data);
+                    self.n_bytes += d_len - old_len;
                 };
             }
         };
@@ -123,6 +141,7 @@ impl RecvBuf {
             .and_then(|seg| self.pop(seg))
     }
 
+    /// removes consecutive data from the buffer
     pub fn pop(&mut self, seq: u32) -> Option<Vec<u8>> {
         if self.data.is_empty() {
             return None;
@@ -141,7 +160,10 @@ impl RecvBuf {
             if e_seg >= lo && e_seg <= hi {
                 clean_up.push(e_seg);
 
+                // this case should not be happening really but dont know for sure
                 if e_seg + entry.1.len() as u32 > hi {
+                    warn!("overlapping data found");
+
                     let dif = hi - e_seg;
                     data.truncate(data.len() - dif as usize);
                     data.extend_from_slice(entry.1);
@@ -156,6 +178,7 @@ impl RecvBuf {
             debug_assert!(r.is_some());
         }
 
+        self.n_bytes -= data.len() as u16;
         Some(data)
     }
 
@@ -168,6 +191,15 @@ impl RecvBuf {
 
     pub fn clear(&mut self) {
         self.data.clear();
+        self.n_bytes = 0;
+    }
+
+    pub fn available_cap(&self) -> u16 {
+        self.cap - self.n_bytes
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.n_bytes == 0
     }
 }
 

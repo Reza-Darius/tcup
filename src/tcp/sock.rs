@@ -3,21 +3,26 @@ use tokio::sync::{mpsc::Sender, oneshot};
 
 use crate::{
     tcp::{
-        error::TCPError::{self, SocketError}, handler::active_open, opts::TCPOpts, skcb::{Open, SKCB, TCPState}, tcp_packet::{TCPFlags, TCPHdr},
-    }, utils::packet::{IP, Packet, TCP},
+        error::TCPError::{self, SocketError},
+        handler::active_open,
+        opts::TCPOpts,
+        skcb::{Open, SKCB, TCPState},
+        tcp_packet::{TCPFlags, TCPHdr},
+    },
+    utils::packet::{IP, Packet, TCP},
 };
 
-// TODO: when a packet arrives for a non existing socket
-// all data in the incoming segment is discarded. An incoming segment containing a RST is discarded. An incoming segment not containing a RST causes a RST to be sent in response. The acknowledgment and sequence field values are selected to make the reset sequence acceptable to the TCP endpoint that sent the offending segment.
-//
-// If the ACK bit is off, sequence number zero is used,
-// <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK>
-//
-// If the ACK bit is on,
-// <SEQ=SEG.ACK><CTL=RST>
+/// call this for getting a packet addressed to a non existing socket
+pub async fn no_socket_found(seg: Packet<TCP>, sender: &Sender<Packet<IP>>) {
+    // when a packet arrives for a non existing socket
+    // all data in the incoming segment is discarded. An incoming segment containing a RST is discarded. An incoming segment not containing a RST causes a RST to be sent in response. The acknowledgment and sequence field values are selected to make the reset sequence acceptable to the TCP endpoint that sent the offending segment.
+    //
+    // If the ACK bit is off, sequence number zero is used,
+    // <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK>
+    //
+    // If the ACK bit is on,
+    // <SEQ=SEG.ACK><CTL=RST>
 
-/// use this for getting a packet addressed to a non existing socket
-pub async fn no_sock_found(seg: Packet<TCP>, sender: &Sender<Packet<IP>>) {
     let ip_hdr = seg.ip_hdr();
     let hdr = seg.hdr();
 
@@ -95,6 +100,10 @@ impl Socket {
             .send(message)
             .await
             .map_err(|e| SocketError(format!("error when calling socket: {e}")))
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.worker_handle.is_finished()
     }
 }
 

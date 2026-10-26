@@ -2,32 +2,29 @@ use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 use super::sock::TCPCon;
 use crate::eth::ETH_FRAME_MAX_SIZE;
-use crate::ip::IPv4Hdr;
 use crate::tcp::buffer::{RecvBuf, SendBuf};
-use crate::tcp::error::TCPError::{self, SKCBError};
+use crate::tcp::error::TCPError::{self};
 use crate::tcp::handler::seg_handler;
-use crate::tcp::skcb::TCPState::{Listen, SynReceived};
 use crate::tcp::{
     opts::TCPOpts,
     rto::RTO,
     seq::*,
     sock::*,
-    tcp_packet::{TCP_HDR_MINSIZE, TCPFlags, TCPHdr},
+    tcp_packet::{ TCPFlags, TCPHdr},
     timer::TIME_WAIT,
 };
 use crate::utils::packet::{IP, Packet, TCP};
 
 pub const WRD_SIZE: usize = 4;
-pub const WND_SIZE: u16 = 10000;
 
 pub const CHAN_BUF_SIZE: usize = ETH_FRAME_MAX_SIZE * 100;
 pub const SYN_ACK_RETRIES: u64 = 5;
 
-pub const SND_RCV_BUF_SIZE: usize = 512;
+pub const SND_RCV_BUF_SIZE: u16 = 10000;
 
 type Result<T> = std::result::Result<T, TCPError>;
 
@@ -55,7 +52,7 @@ impl DerefMut for SKCB {
 pub struct SKCBInner {
     pub con: TCPCon,
     pub status: TCPState,
-    pub tcb: Tcb,
+    pub tcb: TCB,
     pub open: Open,
 
     /// communication channel for receiving TCP data and user calls
@@ -77,20 +74,23 @@ pub enum Open {
 
 impl SKCB {
     pub(super) fn new(rx: Receiver<SocketMessage>, tx: Sender<Packet<IP>>, con: TCPCon) -> Self {
-        SKCB {
+        let mut skcb = SKCB {
             inner: Box::new(SKCBInner {
-                tcb: Tcb::default(),
+                tcb: TCB::default(),
                 open: Open::Passive,
 
                 in_chan: rx,
                 out_chan: tx,
 
-                snd_buf: SendBuf::new(SND_RCV_BUF_SIZE),
-                rcv_buf: RecvBuf::new(SND_RCV_BUF_SIZE),
+                snd_buf: SendBuf::new(SND_RCV_BUF_SIZE as usize),
+                rcv_buf: RecvBuf::new(SND_RCV_BUF_SIZE as usize),
                 status: TCPState::Closed,
                 con,
             }),
-        }
+        };
+
+        skcb.tcb.rcv_wnd = SND_RCV_BUF_SIZE;
+        skcb
     }
 
     /// event loop listening for user calls, data segments and timers
@@ -106,6 +106,7 @@ impl SKCB {
 
         loop {
             if matches!(self.status, TCPState::Closed) {
+                debug!("closing socket");
                 return Ok(());
             }
 
@@ -146,6 +147,8 @@ impl SKCB {
         }
     }
 
+    /// a template for a header
+    #[inline(always)]
     fn hdr_t(&self) -> TCPHdr {
         TCPHdr {
             sport: self.con.local_port.into(),
@@ -153,36 +156,34 @@ impl SKCB {
             seq: self.tcb.snd_nxt.into(),
             ack: self.tcb.rcv_nxt.into(),
             flags: TCPFlags::default(),
-            win_size: WND_SIZE.into(),
+            win_size: self.tcb.rcv_wnd.into(),
             ..Default::default()
         }
     }
 
-    /// updates the control block
-    fn update_tcb(&mut self, eth: &Packet<TCP>) {
-        let inc_ip_hdr = eth.ip_hdr();
-        let inc_tcp_hdr = *eth.hdr();
-
-        // populate control block
-        self.update(inc_ip_hdr, &inc_tcp_hdr);
+    /// calculates the currently usable send window
+    pub(super) fn usable_window(&self) -> u32 {
+        self.tcb
+            .snd_una
+            .wrapping_add(self.tcb.snd_wnd as u32)
+            .wrapping_sub(self.tcb.snd_nxt)
+            .min(self.tcb.snd_wnd as u32)
     }
 
-    /// updates the TCB with the values of a packet
-    fn update(&mut self, ip_hdr: &IPv4Hdr, tcp_hdr: &TCPHdr) {
-        let tcb = &mut self.inner.tcb;
+    /// updates the control block
+    fn update_tcb(&mut self, seg: &Packet<TCP>) {
+        let ip_hdr = seg.ip_hdr();
+        let tcp_hdr = *seg.hdr();
 
+        // populate control block
+
+        let tcb = &mut self.inner.tcb;
         tcb.seg_seq = tcp_hdr.seq.get();
         tcb.seg_ack = tcp_hdr.ack.get();
-        tcb.seg_wnd = tcp_hdr.win_size.get();
-        tcb.last_seq = tcb.seg_seq + tcb.seg_len - 1;
+        // tcb.seg_wnd = tcp_hdr.win_size.get();
+        // tcb.snd_wnd = tcb.seg_wnd;
 
         tcb.seg_len = ip_hdr.tot_len() as u32 - ip_hdr.len() as u32 - tcp_hdr.len() as u32;
-        if tcp_hdr.is_syn() {
-            tcb.seg_len += 1;
-        }
-        if tcp_hdr.is_fin() {
-            tcb.seg_len += 1;
-        }
     }
 
     /// sends a packet out through the open connection
@@ -192,7 +193,9 @@ impl SKCB {
         opts: TCPOpts,
         tcp_pay: &[u8],
     ) -> Result<()> {
-        // TODO: maybe we send outstanding data here?
+        if matches!(self.status, TCPState::Established | TCPState::CloseWait) {
+            // send remaining data
+        }
         let packet = Packet::<TCP>::new(
             self.con.local_ip,
             self.con.remote_ip,
@@ -206,25 +209,40 @@ impl SKCB {
 
     /// sends a naked ack based on current control block values
     ///
-    /// can also serve as challenge ack?
+    /// can also serve as challenge ack
     pub(super) async fn send_ack(&self) -> Result<()> {
         trace!("sending ack");
 
-        // TODO: aggregate ACKs
-
-        let inner = &self.inner;
-        let mut tcp_hdr = TCPHdr {
-            sport: inner.con.local_port.into(),
-            dport: inner.con.remote_port.into(),
-            seq: inner.tcb.snd_nxt.into(),
-            ack: inner.tcb.rcv_nxt.into(),
-            flags: TCPFlags::default(),
-            win_size: WND_SIZE.into(),
-            ..Default::default()
-        };
-
+        let mut tcp_hdr = self.hdr_t();
         tcp_hdr.set_ack();
-        tcp_hdr.set_len(TCP_HDR_MINSIZE);
+        self.output(tcp_hdr, TCPOpts::default(), &[]).await
+    }
+
+    pub(super) async fn send_fin(&mut self) -> Result<()> {
+        trace!("sending fin");
+
+        // sending our own FIN
+        let mut tcp_hdr = self.hdr_t();
+
+        // FIN takes one seq number
+        self.tcb.snd_nxt = self.tcb.snd_nxt.wrapping_add(1);
+
+        tcp_hdr.set_fin();
+        self.output(tcp_hdr, TCPOpts::default(), &[]).await
+    }
+
+    pub(super) async fn send_fin_ack(&mut self) -> Result<()> {
+        trace!("sending fin ack");
+
+        // sending our own FIN
+        let mut tcp_hdr = self.hdr_t();
+
+        // FIN takes one seq number
+        self.tcb.snd_nxt = self.tcb.snd_nxt.wrapping_add(1);
+
+        tcp_hdr.set_fin();
+        tcp_hdr.set_ack();
+
         self.output(tcp_hdr, TCPOpts::default(), &[]).await
     }
 
@@ -238,14 +256,9 @@ impl SKCB {
             return Ok(());
         }
 
-        let mut tcp_hdr = TCPHdr {
-            sport: inner.con.local_port.into(),
-            dport: inner.con.remote_port.into(),
-            ..Default::default()
-        };
+        let mut tcp_hdr = self.hdr_t();
 
         tcp_hdr.set_rst();
-        tcp_hdr.set_len(TCP_HDR_MINSIZE);
 
         match self.status {
             TCPState::Listen => {
@@ -268,7 +281,7 @@ impl SKCB {
     /// checks for acceptable ACK
     pub(super) fn check_ack(&self, tcp_hdr: &TCPHdr) -> bool {
         if !tcp_hdr.is_ack() {
-            return true;
+            return false;
         }
 
         let inner = &self.inner;
@@ -280,20 +293,8 @@ impl SKCB {
         seq_lt(snd_una, seg_ack) && seq_lte(seg_ack, snd_nxt)
     }
 
-    // Segment Receive  Test
-    // Length  Window
-    // ------- -------  -------------------------------------------
-    //
-    //    0       0     SEG.SEQ = RCV.NXT
-    //
-    //    0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
-    //
-    //   >0       0     not acceptable
-    //
-    //   >0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
-    //               or RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
-    /// checks for acceptable segment, and sends a reply
-    pub(super) async fn check_seg(&self) -> Result<()> {
+    /// checks for acceptable segment, i.e a segment that respects our receive window
+    pub(super) fn check_seq(&self) -> bool {
         match self.status {
             TCPState::Listen | TCPState::SynSent => {
                 panic!("seg check triggered in unacceptable state")
@@ -301,48 +302,37 @@ impl SKCB {
             _ => {}
         };
 
-        let check = {
-            let tcb = &self.inner.tcb;
+        let tcb = &self.inner.tcb;
 
-            let seg_seq = tcb.seg_seq;
-            let seg_len = tcb.seg_len;
-            let rcv_nxt = tcb.rcv_nxt;
-            let rcv_wnd = tcb.rcv_wnd;
+        let seg_seq = tcb.seg_seq;
+        let seg_len = tcb.seg_len;
+        let rcv_nxt = tcb.rcv_nxt;
+        let rcv_wnd = tcb.rcv_wnd as u32;
 
-            if seg_len == 0 {
-                match rcv_wnd {
-                    0 => seg_seq == rcv_nxt,
-                    _ => seq_lte(rcv_nxt, seg_seq) && seq_lt(seg_seq, rcv_nxt + rcv_wnd),
-                }
-            } else {
-                match rcv_wnd {
-                    0 => false,
-                    _ => {
-                        seq_lte(rcv_nxt, seg_seq) && seq_lt(seg_seq, rcv_nxt + rcv_wnd)
-                            || seq_lte(rcv_nxt, seg_seq + seg_len - 1)
-                                && seq_lt(seg_seq + seg_len - 1, rcv_nxt + rcv_wnd)
-                    }
-                }
-            }
-        };
+        // Segment Receive  Test
+        // Length  Window
+        // ------- -------  -------------------------------------------
+        //
+        //    0       0     SEG.SEQ = RCV.NXT
+        //
+        //    0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
+        //
+        //   >0       0     not acceptable
+        //
+        //   >0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
+        //               or RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
 
-        if !check {
-            self.send_ack().await?;
-            Err(SKCBError("unacceptable segment".to_string()))
+        if rcv_wnd == 0 {
+            seg_seq == rcv_nxt
+        } else if seg_len == 0 {
+            seq_lte(rcv_nxt, seg_seq) && seq_lt(seg_seq, rcv_nxt + rcv_wnd)
         } else {
-            Ok(())
+            seq_lte(rcv_nxt, seg_seq) && seq_lt(seg_seq, rcv_nxt + rcv_wnd)
+                || seq_lte(rcv_nxt, seg_seq + seg_len - 1)
+                    && seq_lt(seg_seq + seg_len - 1, rcv_nxt + rcv_wnd)
         }
     }
 
-    // pub fn update_rto(&mut self, seg: &TCPSegment) -> Result<()> {
-    //     // we only update RTQ/RTO if the segment advances the windows (SND.UNA) and is ack
-    //     match self.status {
-    //         TCPState::SynSent => todo!(),
-    //         TCPState::SynReceived => todo!(),
-    //         _ => todo!(),
-    //     }
-    // }
-    //
     // fn retransmit(&mut self) -> Result<()> {
     //     // pop seg from queue
     //     // call send()
@@ -353,26 +343,37 @@ impl SKCB {
     pub fn clear_rto(&mut self) {
         // TODO: impl
     }
+
+    #[inline(always)]
+    pub(super) fn change_state(&mut self, to: TCPState) {
+        #[cfg(debug_assertions)]
+        {
+            // TODO: check illegal state transitions?
+        }
+
+        trace!(from = ?self.status, to = ?to, "changing state");
+        self.status = to;
+    }
 }
 
 /// transmission control block
 #[derive(Debug, Default)]
-pub struct Tcb {
+pub struct TCB {
     /// unacknowledged data in flight
     pub snd_una: u32,
-    /// data that could be sent
+    /// data that could be sent, usually the seq in the reply
     pub snd_nxt: u32,
     /// window size (upper limit) = UNA + window size
-    pub snd_wnd: u32,
+    pub snd_wnd: u16,
     /// segment sequence number used for last window update
     pub snd_wl1: u32,
     /// segment acknowledgment number used for last window update
     pub snd_wl2: u32,
 
-    /// next byte to receive
+    /// next byte to receive, incrementing this is equivalent to ACKing data in the response
     pub rcv_nxt: u32,
     /// future seq number not yet allowed (upper limit)
-    pub rcv_wnd: u32,
+    pub rcv_wnd: u16,
 
     /// initial send sequence number
     pub iss: u32,
@@ -399,7 +400,7 @@ pub struct Tcb {
     pub rto: RTO,
 }
 
-impl std::fmt::Display for Tcb {
+impl std::fmt::Display for TCB {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

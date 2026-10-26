@@ -168,7 +168,20 @@ impl PseudoHdr {
     }
 }
 
-pub struct TCPPayload(Vec<u8>);
+pub struct TCPPayload {
+    data: Vec<u8>,
+    offset: usize, // the offset of the actual TCP payload, as the buffer retains ETH/IP info
+}
+
+impl TCPPayload {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data[self.offset..]
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len() - self.offset
+    }
+}
 
 impl Packet<TCP> {
     pub fn parse(packet: Packet<IP>) -> Result<Self, TCPError> {
@@ -231,8 +244,21 @@ impl Packet<TCP> {
         packet
     }
 
-    pub fn into_parts(self) -> (TCPHdr, TCPPayload) {
-        todo!()
+    pub fn into_parts(self) -> (TCPHdr, Option<TCPPayload>) {
+        let hdr = *self.hdr();
+
+        if self.payload().is_empty() {
+            (hdr, None)
+        } else {
+            let offset = ETH_HDR_SIZE + self.iphdr_size() + self.hdr_size();
+            (
+                hdr,
+                Some(TCPPayload {
+                    offset,
+                    data: self.into_buf(),
+                }),
+            )
+        }
     }
 
     fn iphdr_size(&self) -> usize {
@@ -347,6 +373,7 @@ impl Packet<TCP> {
         (&mut self.as_buf_mut()[check_off..]).put_u16(checksum);
     }
 
+    /// payload of the TCP packet
     pub fn payload(&self) -> &[u8] {
         let lo = self.tcp_offset() + self.hdr_size();
         let hi = lo + self.ip_hdr().tot_len() as usize - self.iphdr_size() - self.hdr_size();

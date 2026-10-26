@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::Sender;
 
 use crate::{
-    tcp::sock::{Socket, TCPCall, TCPCon}, utils::packet::{IP, Packet, TCP},
+    tcp::sock::{Socket, TCPCall, TCPCon},
+    utils::packet::{IP, Packet, TCP},
 };
 
 pub trait TransportService {
@@ -34,8 +35,9 @@ impl TransportService for TCPServiceV1 {
 impl TCPServiceV1 {
     fn service_segment(&self, segment: Packet<TCP>) {
         // - check connection table
-        // - if connection found, send the segment to socket
+        // - if connection found,
+        //      if socket is not closed
+        //          send the segment to socket
         // - else send reset
     }
 }
-
