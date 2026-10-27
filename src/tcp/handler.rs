@@ -1,6 +1,6 @@
 use std::assert_matches;
 
-use tracing::{debug, instrument, trace};
+use tracing::{debug, instrument};
 
 use super::error::TCPError;
 use crate::eth::ETH_FRAME_MAX_SIZE;
@@ -34,7 +34,7 @@ pub async fn seg_handler(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     // what to do when we get a syn rst packet?
     let hdr = seg.hdr();
 
-    if handle_rst(skcb, hdr).await || handle_syn(skcb, hdr).await {
+    if handle_rst(skcb, hdr).await || handle_syn(skcb, hdr).await || handle_ack(skcb, hdr).await {
         return Ok(());
     };
 
@@ -117,6 +117,27 @@ async fn handle_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
     }
 }
 
+/// returns true if the segment should be dropped
+async fn handle_ack(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
+    match (hdr.is_ack(), skcb.status) {
+        (true, TCPState::Listen) => {
+            skcb.send_rst(hdr).await.unwrap();
+            true
+        }
+        (true, TCPState::SynSent) => {
+            if seq_lte(skcb.tcb.seg_ack, skcb.tcb.iss) || seq_gt(skcb.tcb.seg_ack, skcb.tcb.snd_nxt)
+            {
+                skcb.send_rst(hdr).await.unwrap();
+                true
+            } else {
+                false
+            }
+        }
+        (true, _) => false,
+        (false, _) => true,
+    }
+}
+
 /// response to connect call, actively opening a connection
 pub async fn active_open(skcb: &mut SKCB) -> Result<()> {
     assert_matches!(
@@ -169,18 +190,8 @@ pub async fn active_open(skcb: &mut SKCB) -> Result<()> {
 async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     let seg_hdr = seg.hdr();
 
-    if seg_hdr.is_ack() {
-        skcb.send_rst(seg_hdr).await?;
-        return Err(HandlerError("ACK received".to_string()));
-    }
-
     if seg_hdr.is_fin() {
         return Err(HandlerError("cant process fin segment".to_string()));
-    }
-
-    // probably unneccessary
-    if !seg_hdr.is_syn() {
-        return Err(HandlerError("received seg without SYN".to_string()));
     }
 
     debug!("req TCP:\n{}", seg_hdr);
@@ -240,6 +251,7 @@ async fn finwait1(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     if !skcb.check_seq() {
         return skcb.send_ack().await;
     };
+
     let (seg_hdr, seg_payload) = seg.into_parts();
 
     check_ack(skcb).await?;
@@ -288,17 +300,25 @@ async fn finwait2(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 }
 
 /// event handler for CLOSING state
+///
+/// here we sent a fin and received a fin, but didnt have our fin acked yet
 async fn closing(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     if !skcb.check_seq() {
         return skcb.send_ack().await;
     };
 
-    todo!()
+    check_ack(skcb).await?;
+    let sent_fin_accepted = skcb.tcb.snd_una == skcb.tcb.snd_nxt;
+
+    if sent_fin_accepted {
+        skcb.change_state(TCPState::TimeWait);
+    }
+    Ok(())
 }
 
 /// event handler for CLOSE WAIT state
 ///
-/// this is the state for the other sides initiates a a shutdown
+/// this is the state for the other side sent a FIN which we ackd
 async fn close_wait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     if !skcb.check_seq() {
         return skcb.send_ack().await;
@@ -306,6 +326,7 @@ async fn close_wait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
     // TODO: empty send buffer and send FIN packet
 
+    check_ack(skcb).await?;
     skcb.send_fin().await?;
     skcb.change_state(TCPState::LastAck);
     Ok(())
@@ -364,12 +385,6 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
     let hdr = seg.hdr();
 
-    if !hdr.is_ack() {
-        return Err(HandlerError(
-            "no ACK set, terminating connection".to_string(),
-        ));
-    }
-
     // SND.UNA < SEG.ACK <= SND.NXT
     if seq_lt(skcb.tcb.snd_una, skcb.tcb.seg_ack) && seq_lte(skcb.tcb.seg_ack, skcb.tcb.snd_nxt) {
         // ACK packets dont carry data so the windows doesnt advance
@@ -425,9 +440,9 @@ async fn established(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     }
 
     check_ack(skcb).await?;
-    check_snd_window(skcb);
 
     let accepted = accept_data(skcb, &seg_hdr, seg_payload);
+
     if matches!(accepted, AcceptResult::Fin) {
         skcb.tcb.rcv_nxt = skcb.tcb.rcv_nxt.wrapping_add(1);
 
@@ -444,13 +459,15 @@ async fn established(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     Ok(())
 }
 
-/// helper function to check if the segment ACKd outstanding data. False indicates pure ACK
+/// helper function to check if the segment ACKd outstanding data. True indicates new data was ACKd
 async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
     // shorthand variables
     let snd_una = skcb.tcb.snd_una;
     let seg_ack = skcb.tcb.seg_ack;
     let seg_seq = skcb.tcb.seg_seq;
     let snd_nxt = skcb.tcb.snd_nxt;
+
+    let ackd;
 
     // does the segment ACK in flight data (snd_una)?
     if seq_gt(seg_ack, snd_una) {
@@ -463,7 +480,7 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
 
             // we have to handle the case where a FIN takes up a sequence number but doesnt mess
             // with our buffer
-            if matches!(skcb.status, TCPState::FinWait1) && seg_ack == snd_nxt {
+            if matches!(skcb.status, TCPState::FinWait1 | TCPState::LastAck) && seg_ack == snd_nxt {
                 acked -= 1;
             }
 
@@ -488,14 +505,25 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
 
             // TODO::
             // - if the buffer has been fully acknowledged, return OK response to user
-            return Ok(true);
+            ackd = true;
         } else {
             skcb.send_ack().await?;
             return Err(HandlerError("ACK lies beyond snd next".into()));
         }
+    } else {
+        ackd = false
     };
-    // in this case, its a pure ack
-    Ok(false)
+
+    // update send window
+    if seq_lt(skcb.tcb.snd_wl1, seg_seq)
+        || (skcb.tcb.snd_wl1 == seg_seq && seq_lte(skcb.tcb.snd_wl2, seg_ack))
+    {
+        skcb.tcb.snd_wnd = skcb.tcb.seg_wnd;
+        skcb.tcb.snd_wl1 = seg_seq;
+        skcb.tcb.snd_wl2 = seg_ack;
+    }
+
+    Ok(ackd)
 }
 
 /// helper functon for checking the send window
@@ -518,7 +546,7 @@ fn check_snd_window(skcb: &mut SKCB) {
 
 enum AcceptResult {
     Not,
-    /// might also be ACK only
+    /// might also be a pure ACK (ACK without any new data)
     Data,
     Fin,
 }

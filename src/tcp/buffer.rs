@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use tracing::warn;
+use tracing::{trace, warn};
 
 use crate::tcp::{error::TCPError, tcp_packet::TCP_SEG_MAX_SIZE};
 
@@ -65,6 +65,8 @@ impl SendBuf {
 
     /// mark len bytes as ACKd, moving up the cursor
     pub fn free(&mut self, len: usize) {
+        trace!(len, "freeing send buffer");
+
         assert!(self.count + len <= self.data.len());
         self.count += len;
         if self.count == self.data.len() {
@@ -114,6 +116,7 @@ impl RecvBuf {
         }
 
         let data = data.into();
+
         assert!((self.n_bytes + data.len() as u16) < self.cap);
 
         match self.data.entry(self.key(seq)) {
@@ -132,6 +135,8 @@ impl RecvBuf {
                 };
             }
         };
+
+        trace!(cur_size = self.n_bytes, "inserting into rcv buffer");
     }
 
     pub fn pop_first(&mut self) -> Option<Vec<u8>> {

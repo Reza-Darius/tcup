@@ -14,7 +14,7 @@ use crate::tcp::{
     rto::RTO,
     seq::*,
     sock::*,
-    tcp_packet::{ TCPFlags, TCPHdr},
+    tcp_packet::{TCPFlags, TCPHdr},
     timer::TIME_WAIT,
 };
 use crate::utils::packet::{IP, Packet, TCP};
@@ -301,6 +301,9 @@ impl SKCB {
             }
             _ => {}
         };
+
+        // TODO:
+        // If the RCV.WND is zero, no segments will be acceptable, but special allowance should be made to accept valid ACKs, URGs, and RSTs.
 
         let tcb = &self.inner.tcb;
 
