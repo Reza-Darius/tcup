@@ -1,14 +1,15 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, net::SocketAddrV4};
 
 use tokio::sync::mpsc::Sender;
+use tracing::error;
 
 use crate::{
-    tcp::sock::{Socket, TCPCall, TCPCon},
+    tcp::sock::{Socket, SocketMessage, TCPCall, TCPCon, no_socket_found},
     utils::packet::{IP, Packet, TCP},
 };
 
 pub trait TransportService {
-    fn service_request(&mut self, call: TCPCall);
+    async fn service_request(&mut self, call: TCPCall);
 }
 
 struct TCPServiceV1 {
@@ -17,27 +18,40 @@ struct TCPServiceV1 {
 
     /// connection table
     con_table: HashMap<TCPCon, Socket>,
+    listen_table: HashMap<SocketAddrV4, Socket>,
 }
 
 impl TransportService for TCPServiceV1 {
-    fn service_request(&mut self, call: TCPCall) {
+    async fn service_request(&mut self, call: TCPCall) {
         match call {
             TCPCall::Connect(_) => todo!(),
             TCPCall::Listen(_) => todo!(),
             TCPCall::Close => todo!(),
             TCPCall::Send(items) => todo!(),
             TCPCall::Receive(sender) => todo!(),
-            TCPCall::Segment(packet) => todo!(),
+            TCPCall::Segment(packet) => self.service_segment(packet).await,
         }
     }
 }
 
 impl TCPServiceV1 {
-    fn service_segment(&self, segment: Packet<TCP>) {
-        // - check connection table
-        // - if connection found,
-        //      if socket is not closed
-        //          send the segment to socket
-        // - else send reset
+    async fn new_listen(&mut self, addr: SocketAddrV4) {
+        let sock = Socket::listen(self.ip_svc.clone(), addr, 100);
+        self.listen_table.insert(addr, sock);
+    }
+
+    async fn service_segment(&mut self, segment: Packet<TCP>) {
+        let con = segment.con();
+
+        if let Some(socket) = self.con_table.get(&con) {
+            if socket.is_closed() {
+                no_socket_found(segment, &self.ip_svc).await;
+                self.con_table.remove(&con);
+            } else if let Err(e) = socket.call(SocketMessage::Segment(segment)).await {
+                error!(%e, "socket call error");
+            };
+        } else {
+            no_socket_found(segment, &self.ip_svc).await;
+        }
     }
 }

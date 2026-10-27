@@ -31,9 +31,7 @@ type Result<T> = std::result::Result<T, TCPError>;
 #[instrument(skip_all, fields(state = ?skcb.status))]
 pub async fn seg_handler(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     // these behaviours are mostly the same across states so we can handle them right here
-    // what to do when we get a syn rst packet?
     let hdr = seg.hdr();
-
     if handle_rst(skcb, hdr).await || handle_syn(skcb, hdr).await || handle_ack(skcb, hdr).await {
         return Ok(());
     };
@@ -94,6 +92,7 @@ async fn handle_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
     if !hdr.is_syn() {
         return false;
     }
+
     match skcb.status {
         TCPState::SynReceived => {
             match skcb.open {
@@ -108,6 +107,7 @@ async fn handle_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
             skcb.rcv_buf.clear();
             true
         }
+        // see the corresponding handler for syn handling
         TCPState::SynSent | Listen => false,
         _ => {
             // in synchronized state: send challenge ack and drop the segment
@@ -133,8 +133,8 @@ async fn handle_ack(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
                 false
             }
         }
-        (true, _) => false,
-        (false, _) => true,
+        // in all other cases we drop the segment if its not ACK
+        _ => !hdr.is_ack(),
     }
 }
 
@@ -149,7 +149,7 @@ pub async fn active_open(skcb: &mut SKCB) -> Result<()> {
     skcb.open = Open::Active;
 
     // configure initial sequence numbers
-    skcb.tcb.iss = new_isn(&skcb.con);
+    skcb.tcb.iss = new_isn(&skcb.con());
     skcb.tcb.irs = 0;
 
     // building SYN packet
@@ -161,8 +161,8 @@ pub async fn active_open(skcb: &mut SKCB) -> Result<()> {
     skcb.tcb.snd_nxt = skcb.tcb.iss + 1;
 
     let mut tcp_hdr = TCPHdr {
-        sport: skcb.con.local_port.into(),
-        dport: skcb.con.remote_port.into(),
+        sport: skcb.l_port.into(),
+        dport: skcb.r_port.into(),
         seq: skcb.tcb.iss.into(),
         ack: 0.into(),
         flags: TCPFlags::default(),
@@ -194,10 +194,14 @@ async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         return Err(HandlerError("cant process fin segment".to_string()));
     }
 
+    let con = seg.con();
+    skcb.r_addr = con.remote_ip;
+    skcb.r_port = con.remote_port;
+
     debug!("req TCP:\n{}", seg_hdr);
 
     // configure initial sequence numbers
-    skcb.tcb.iss = new_isn(&skcb.con);
+    skcb.tcb.iss = new_isn(&skcb.con());
     skcb.tcb.irs = skcb.tcb.seg_seq;
 
     // building SYN ACK response
@@ -209,8 +213,8 @@ async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     skcb.tcb.snd_nxt = skcb.tcb.iss.wrapping_add(1);
 
     let mut tcp_hdr = TCPHdr {
-        sport: skcb.con.local_port.into(),
-        dport: skcb.con.remote_port.into(),
+        sport: skcb.l_port.into(),
+        dport: skcb.r_port.into(),
         seq: skcb.tcb.iss.into(),
         ack: skcb.tcb.rcv_nxt.into(), // ACKing the irs
         flags: TCPFlags::default(),
@@ -235,12 +239,119 @@ async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     Ok(())
 }
 
+//    TCP A                                                TCP B
+//
+//1.  CLOSED                                               LISTEN
+//
+//2.  SYN-SENT    --> <SEQ=100><CTL=SYN>               --> SYN-RECEIVED
+//
+//3.  ESTABLISHED <-- <SEQ=300><ACK=101><CTL=SYN,ACK>  <-- SYN-RECEIVED
+//
+//4.  ESTABLISHED --> <SEQ=101><ACK=301><CTL=ACK>       --> ESTABLISHED
+//
+//5.  ESTABLISHED --> <SEQ=101><ACK=301><CTL=ACK><DATA> --> ESTABLISHED
+//
+//        Basic 3-Way Handshake for Connection Synchronization
+//
+//                              Figure 7.
+
+/// event handler for SYN RECEIVED state
+async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
+    if !skcb.check_seq() {
+        return skcb.send_ack().await;
+    };
+
+    let hdr = seg.hdr();
+
+    // SND.UNA < SEG.ACK <= SND.NXT
+    if seq_lt(skcb.tcb.snd_una, skcb.tcb.seg_ack) && seq_lte(skcb.tcb.seg_ack, skcb.tcb.snd_nxt) {
+        // ACK packets dont carry data so the windows doesnt advance
+        skcb.tcb.snd_wnd = skcb.tcb.seg_wnd;
+        skcb.tcb.snd_wl1 = skcb.tcb.seg_seq;
+        skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
+
+        // If an MSS Option is not received at connection setup, TCP implementations MUST assume a default send MSS of 536 (576 - 40) for IPv4 or 1220 (1280 - 60) for IPv6 (MUST-15).
+        skcb.tcb.snd_opts = seg.options().unwrap_or_else(|| TCPOpts {
+            mss: Some(536),
+            ..Default::default()
+        });
+
+        debug!("connection established!");
+        skcb.change_state(TCPState::Established);
+
+        // TODO: place any data that accompanies this ack into the buffer
+        return Ok(());
+    } else {
+        let mut tcp_hdr = TCPHdr {
+            sport: skcb.l_port.into(),
+            dport: skcb.r_port.into(),
+            seq: skcb.tcb.seg_ack.into(),
+            ack: skcb.tcb.rcv_nxt.into(),
+            flags: TCPFlags::default(),
+            win_size: WND_SIZE.into(),
+            ..Default::default()
+        };
+
+        tcp_hdr.set_rst();
+        skcb.output(tcp_hdr, TCPOpts::default(), &[]).await?;
+    }
+
+    if hdr.is_fin() {
+        skcb.tcb.rcv_nxt = skcb.tcb.rcv_nxt.wrapping_add(1);
+
+        skcb.change_state(TCPState::CloseWait);
+        skcb.send_ack().await?;
+    }
+    Ok(())
+}
+
 /// event handler for SYN SENT state
 async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     let seg_hdr = seg.hdr();
     if seg_hdr.is_fin() {
         return Err(HandlerError("cant process fin segment".to_string()));
     }
+
+    if seg_hdr.is_syn() {
+        skcb.tcb.rcv_nxt = skcb.tcb.seg_seq.wrapping_add(1);
+        skcb.tcb.irs = skcb.tcb.seg_seq;
+
+        if seg_hdr.is_ack() {
+            skcb.tcb.snd_una = skcb.tcb.seg_ack;
+            debug_assert_eq!(skcb.tcb.snd_una, skcb.tcb.snd_nxt);
+
+            if seq_gt(skcb.tcb.snd_una, skcb.tcb.iss) {
+                skcb.change_state(TCPState::Established);
+                skcb.send_ack().await?;
+            }
+
+        } else {
+            // simultaneous open path
+            skcb.tcb.snd_wnd = skcb.tcb.seg_wnd;
+            skcb.tcb.snd_wl1 = skcb.tcb.seg_seq;
+            skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
+
+            let mut tcp_hdr = TCPHdr {
+                sport: skcb.l_port.into(),
+                dport: skcb.r_port.into(),
+                seq: skcb.tcb.iss.into(),
+                ack: skcb.tcb.rcv_nxt.into(), // ACKing the irs
+                flags: TCPFlags::default(),
+                win_size: WND_SIZE.into(),
+                ..Default::default()
+            };
+
+            tcp_hdr.set_syn();
+            tcp_hdr.set_ack();
+
+            skcb.output(tcp_hdr, TCPOpts::default(), &[]).await?;
+            skcb.change_state(TCPState::SynReceived);
+
+            // TODO:
+            // If there are other controls or text in the segment, queue them for processing after the ESTABLISHED state has been reached, return.
+        }
+    }
+
     todo!()
 }
 
@@ -327,8 +438,11 @@ async fn close_wait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     // TODO: empty send buffer and send FIN packet
 
     check_ack(skcb).await?;
-    skcb.send_fin().await?;
-    skcb.change_state(TCPState::LastAck);
+
+    if skcb.snd_buf.is_empty() {
+        skcb.send_fin().await?;
+        skcb.change_state(TCPState::LastAck);
+    }
     Ok(())
 }
 
@@ -358,72 +472,6 @@ async fn timewait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     if !skcb.check_seq() {
         return skcb.send_ack().await;
     };
-    Ok(())
-}
-
-//    TCP A                                                TCP B
-//
-//1.  CLOSED                                               LISTEN
-//
-//2.  SYN-SENT    --> <SEQ=100><CTL=SYN>               --> SYN-RECEIVED
-//
-//3.  ESTABLISHED <-- <SEQ=300><ACK=101><CTL=SYN,ACK>  <-- SYN-RECEIVED
-//
-//4.  ESTABLISHED --> <SEQ=101><ACK=301><CTL=ACK>       --> ESTABLISHED
-//
-//5.  ESTABLISHED --> <SEQ=101><ACK=301><CTL=ACK><DATA> --> ESTABLISHED
-//
-//        Basic 3-Way Handshake for Connection Synchronization
-//
-//                              Figure 7.
-
-/// event handler for SYN RECEIVED state
-async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
-    if !skcb.check_seq() {
-        return skcb.send_ack().await;
-    };
-
-    let hdr = seg.hdr();
-
-    // SND.UNA < SEG.ACK <= SND.NXT
-    if seq_lt(skcb.tcb.snd_una, skcb.tcb.seg_ack) && seq_lte(skcb.tcb.seg_ack, skcb.tcb.snd_nxt) {
-        // ACK packets dont carry data so the windows doesnt advance
-        skcb.tcb.snd_wnd = skcb.tcb.seg_wnd;
-        skcb.tcb.snd_wl1 = skcb.tcb.seg_seq;
-        skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
-
-        // If an MSS Option is not received at connection setup, TCP implementations MUST assume a default send MSS of 536 (576 - 40) for IPv4 or 1220 (1280 - 60) for IPv6 (MUST-15).
-        skcb.tcb.snd_opts = seg.options().unwrap_or_else(|| TCPOpts {
-            mss: Some(536),
-            ..Default::default()
-        });
-
-        debug!("connection established!");
-        skcb.change_state(TCPState::Established);
-
-        // TODO: place any data that accompanies this ack into the buffer
-        return Ok(());
-    } else {
-        let mut tcp_hdr = TCPHdr {
-            sport: skcb.con.local_port.into(),
-            dport: skcb.con.remote_port.into(),
-            seq: skcb.tcb.seg_ack.into(),
-            ack: skcb.tcb.rcv_nxt.into(),
-            flags: TCPFlags::default(),
-            win_size: WND_SIZE.into(),
-            ..Default::default()
-        };
-
-        tcp_hdr.set_rst();
-        skcb.output(tcp_hdr, TCPOpts::default(), &[]).await?;
-    }
-
-    if hdr.is_fin() {
-        skcb.tcb.rcv_nxt = skcb.tcb.rcv_nxt.wrapping_add(1);
-
-        skcb.change_state(TCPState::CloseWait);
-        skcb.send_ack().await?;
-    }
     Ok(())
 }
 
@@ -483,15 +531,6 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
             if matches!(skcb.status, TCPState::FinWait1 | TCPState::LastAck) && seg_ack == snd_nxt {
                 acked -= 1;
             }
-
-            // #[cfg(debug_assertions)]
-            // {
-            //     if matches!(skcb.status, TCPState::LastAck) {
-            //         assert!(acked == 0);
-            //     } else {
-            //         assert!(acked != 0);
-            //     }
-            // }
 
             skcb.snd_buf.free(acked);
 

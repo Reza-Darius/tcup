@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use tokio::sync::{mpsc::Sender, oneshot};
 
 use crate::{
@@ -62,9 +62,9 @@ pub struct Socket {
 
 impl Socket {
     /// creates a new listening socket
-    pub fn listen(tx: Sender<Packet<IP>>, con: TCPCon, chan_size: usize) -> Self {
+    pub fn listen(tx: Sender<Packet<IP>>, addr: SocketAddrV4, chan_size: usize) -> Self {
         let (s_tx, s_rx) = tokio::sync::mpsc::channel(chan_size);
-        let mut skcb = SKCB::new(s_rx, tx, con);
+        let mut skcb = SKCB::new(s_rx, tx, addr);
 
         let handle = tokio::spawn(async move {
             skcb.status = TCPState::Listen;
@@ -80,11 +80,13 @@ impl Socket {
     }
 
     /// creates a new connection socket
-    pub fn connect(tx: Sender<Packet<IP>>, con: TCPCon, chan_size: usize) -> Self {
+    pub fn connect(tx: Sender<Packet<IP>>, addr: SocketAddrV4, chan_size: usize) -> Self {
         let (s_tx, s_rx) = tokio::sync::mpsc::channel(chan_size);
-        let mut skcb = SKCB::new(s_rx, tx, con);
+        let mut skcb = SKCB::new(s_rx, tx, addr);
 
         let handle = tokio::spawn(async move {
+            // TODO: set up addresses
+
             active_open(&mut skcb).await.unwrap();
             skcb.run().await.unwrap();
         });

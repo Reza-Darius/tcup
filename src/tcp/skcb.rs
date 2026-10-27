@@ -1,4 +1,6 @@
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -50,7 +52,12 @@ impl DerefMut for SKCB {
 
 #[derive(Debug)]
 pub struct SKCBInner {
-    pub con: TCPCon,
+    pub l_addr: Ipv4Addr,
+    pub l_port: u16,
+
+    pub r_addr: Ipv4Addr,
+    pub r_port: u16,
+
     pub status: TCPState,
     pub tcb: TCB,
     pub open: Open,
@@ -73,7 +80,11 @@ pub enum Open {
 }
 
 impl SKCB {
-    pub(super) fn new(rx: Receiver<SocketMessage>, tx: Sender<Packet<IP>>, con: TCPCon) -> Self {
+    pub(super) fn new(
+        rx: Receiver<SocketMessage>,
+        tx: Sender<Packet<IP>>,
+        addr: SocketAddrV4,
+    ) -> Self {
         let mut skcb = SKCB {
             inner: Box::new(SKCBInner {
                 tcb: TCB::default(),
@@ -85,7 +96,12 @@ impl SKCB {
                 snd_buf: SendBuf::new(SND_RCV_BUF_SIZE as usize),
                 rcv_buf: RecvBuf::new(SND_RCV_BUF_SIZE as usize),
                 status: TCPState::Closed,
-                con,
+
+                l_addr: *addr.ip(),
+                l_port: addr.port(),
+
+                r_addr: Ipv4Addr::new(0, 0, 0, 0),
+                r_port: 0,
             }),
         };
 
@@ -151,13 +167,22 @@ impl SKCB {
     #[inline(always)]
     fn hdr_t(&self) -> TCPHdr {
         TCPHdr {
-            sport: self.con.local_port.into(),
-            dport: self.con.remote_port.into(),
+            sport: self.l_port.into(),
+            dport: self.r_port.into(),
             seq: self.tcb.snd_nxt.into(),
             ack: self.tcb.rcv_nxt.into(),
             flags: TCPFlags::default(),
             win_size: self.tcb.rcv_wnd.into(),
             ..Default::default()
+        }
+    }
+
+    pub fn con(&self) -> TCPCon {
+        TCPCon {
+            local_ip: self.l_addr,
+            local_port: self.l_port,
+            remote_ip: self.r_addr,
+            remote_port: self.r_port,
         }
     }
 
@@ -193,16 +218,11 @@ impl SKCB {
         opts: TCPOpts,
         tcp_pay: &[u8],
     ) -> Result<()> {
+        let con = self.con();
         if matches!(self.status, TCPState::Established | TCPState::CloseWait) {
             // send remaining data
         }
-        let packet = Packet::<TCP>::new(
-            self.con.local_ip,
-            self.con.remote_ip,
-            tcp_hdr,
-            opts,
-            tcp_pay,
-        );
+        let packet = Packet::<TCP>::new(con.local_ip, con.remote_ip, tcp_hdr, opts, tcp_pay);
         self.out_chan.send(packet).await.unwrap();
         Ok(())
     }
