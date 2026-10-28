@@ -1,5 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::sync::{mpsc::Sender, oneshot};
+use tracing::{error, warn};
 
 use crate::{
     tcp::{
@@ -55,7 +56,7 @@ pub async fn no_socket_found(seg: Packet<TCP>, sender: &Sender<Packet<IP>>) {
         .unwrap();
 }
 
-/// a handle to a socket 
+/// a handle to a socket
 pub struct Socket {
     sender: Sender<SocketMessage>,
     worker_handle: tokio::task::JoinHandle<()>,
@@ -102,6 +103,7 @@ impl Socket {
         self.sender
             .send(message)
             .await
+            .inspect_err(|e| error!(%e, "error when calling socket"))
             .map_err(|e| SocketError(format!("error when calling socket: {e}")))
     }
 
@@ -116,11 +118,19 @@ impl Socket {
         }
 
         let (tx, rx) = oneshot::channel();
-        self.sender
-            .send(SocketMessage::Status(tx))
-            .await
-            .expect("the tcp isnt closed so this should work");
-        rx.await.expect("the sender cant be dropped")
+
+        let Ok(_) = self.sender.send(SocketMessage::Status(tx)).await else {
+            return TCPState::Closed;
+        };
+
+        rx.await.unwrap_or(TCPState::Closed)
+    }
+
+    pub async fn send_seg(&self, segment: Packet<TCP>) -> TCPState {
+        let Ok(_) = self.call(SocketMessage::Segment(segment)).await else {
+            return TCPState::Closed;
+        };
+        self.status().await
     }
 }
 
@@ -136,8 +146,8 @@ pub struct TCPCon {
 /// user facing interface
 #[derive(Debug)]
 pub enum TCPCall {
-    Connect(((Ipv4Addr, u16), oneshot::Sender<TCPCon>)),
-    Listen(((Ipv4Addr, u16), oneshot::Sender<TCPCon>)),
+    Connect((SocketAddrV4, oneshot::Sender<TCPCon>)),
+    Listen(SocketAddrV4),
     Close,
 
     Send((TCPCon, Vec<u8>)),

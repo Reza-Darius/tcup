@@ -11,3 +11,4 @@ mod tcp_packet;
 mod timer;
 
 pub use skcb::TCPState;
+pub use error::TCPError;

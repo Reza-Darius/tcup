@@ -1,6 +1,6 @@
 use std::assert_matches;
 
-use tracing::{debug, instrument};
+use tracing::instrument;
 
 use super::error::TCPError;
 use crate::eth::ETH_FRAME_MAX_SIZE;
@@ -29,8 +29,10 @@ type Result<T> = std::result::Result<T, TCPError>;
 /// dispatch the correct handler for a segment event
 #[instrument(skip_all, fields(state = ?skcb.status))]
 pub async fn seg_handler(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
-    // these behaviours are the same across synchronize states so we can handle them right here
     let hdr = seg.hdr();
+
+    // in synchronized states we can handle step 1 (seq check), step 2 (rst check) and step 3 (ack check)
+    // right here
     if skcb.is_synchronized() {
         if !skcb.check_seq() {
             if !hdr.is_rst() {
@@ -39,7 +41,7 @@ pub async fn seg_handler(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
             return Ok(());
         }
 
-        if handle_rst(skcb, hdr).await || handle_syn(skcb, hdr).await || !hdr.is_ack() {
+        if handle_sync_rst(skcb, hdr).await || handle_sync_syn(skcb, hdr).await || !hdr.is_ack() {
             return Ok(());
         };
     }
@@ -61,7 +63,7 @@ pub async fn seg_handler(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 }
 
 /// determines whether the segment should be dropped and possible state change
-async fn handle_rst(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
+async fn handle_sync_rst(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
     if !hdr.is_rst() {
         return false;
     }
@@ -82,7 +84,7 @@ async fn handle_rst(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
 }
 
 /// returns true if the segment should be dropped
-async fn handle_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
+async fn handle_sync_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
     if !hdr.is_syn() {
         return false;
     }
@@ -94,7 +96,7 @@ async fn handle_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
                 true
             }
             Open::Active => false,
-        };
+        }
     } else {
         // challenge ACK
         skcb.send_ack().await.unwrap();
@@ -165,6 +167,8 @@ async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     if !seg_hdr.is_syn() {
         return Err(HandlerError("didnt get syn in listen".to_string()));
     }
+
+    // passive open:
 
     let con = seg.con();
     skcb.r_addr = con.remote_ip;
@@ -241,7 +245,6 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
             ..Default::default()
         });
 
-        debug!("connection established!");
         skcb.change_state(TCPState::Established);
 
         return established(skcb, seg).await;
@@ -342,10 +345,6 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 async fn finwait1(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     // we sent a FIN so we only have to take in data
     // TODO: we need a timer here in case the other side doesnt respond
-    if !skcb.check_seq() {
-        return skcb.send_ack().await;
-    };
-
     let (seg_hdr, seg_payload) = seg.into_parts();
 
     check_ack(skcb).await?;
@@ -375,21 +374,18 @@ async fn finwait1(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
 /// event handler for FIN WAIT2 state
 async fn finwait2(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
-    if !skcb.check_seq() {
-        return skcb.send_ack().await;
-    };
     let (seg_hdr, seg_payload) = seg.into_parts();
 
     // In addition to the processing for the ESTABLISHED state,
     // if the retransmission queue is empty, the user's CLOSE can be acknowledged ("ok") but do not delete the TCB.
 
     check_ack(skcb).await?;
-    accept_data(skcb, &seg_hdr, seg_payload);
+    let accepted = accept_data(skcb, &seg_hdr, seg_payload);
 
-    if seg_hdr.is_fin() {
+    if matches!(accepted, AcceptResult::Fin) {
+        skcb.tcb.rcv_nxt = skcb.tcb.rcv_nxt.wrapping_add(1);
         skcb.change_state(TCPState::TimeWait);
     }
-
     skcb.send_ack().await
 }
 
@@ -397,10 +393,6 @@ async fn finwait2(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 ///
 /// here we sent a fin and received a fin, but didnt have our fin acked yet
 async fn closing(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
-    if !skcb.check_seq() {
-        return skcb.send_ack().await;
-    };
-
     check_ack(skcb).await?;
     let sent_fin_accepted = skcb.tcb.snd_una == skcb.tcb.snd_nxt;
 
@@ -413,11 +405,8 @@ async fn closing(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 /// event handler for CLOSE WAIT state
 ///
 /// this is the state for the other side sent a FIN which we ackd
+/// so we can still send data, and want to empty our snd buffer
 async fn close_wait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
-    if !skcb.check_seq() {
-        return skcb.send_ack().await;
-    };
-
     // TODO: empty send buffer and send FIN packet
 
     check_ack(skcb).await?;
@@ -430,11 +419,9 @@ async fn close_wait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 }
 
 /// event handler for LAST ACK state
+///
+/// we are watiting for an ack for our fin
 async fn last_ack(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
-    if !skcb.check_seq() {
-        return skcb.send_ack().await;
-    };
-
     // TODO: handle inc ACKs, sender is done sending
     // TODO: account for sent FIN flag
 
@@ -452,18 +439,11 @@ async fn last_ack(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 /// this is the lingering stage after the connection terminated
 async fn timewait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     // TODO: deal with retrasnmitted FIN
-    if !skcb.check_seq() {
-        return skcb.send_ack().await;
-    };
     Ok(())
 }
 
 /// handler for segment event in ESTABLISHED state
 async fn established(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
-    if !skcb.check_seq() {
-        return skcb.send_ack().await;
-    };
-
     let (seg_hdr, seg_payload) = seg.into_parts();
 
     if !seg_hdr.is_ack() {
@@ -511,7 +491,7 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
 
             // we have to handle the case where a FIN takes up a sequence number but doesnt mess
             // with our buffer
-            if matches!(skcb.status, TCPState::FinWait1 | TCPState::LastAck) && seg_ack == snd_nxt {
+            if matches!(skcb.status, TCPState::FinWait1 | TCPState::LastAck) {
                 acked -= 1;
             }
 

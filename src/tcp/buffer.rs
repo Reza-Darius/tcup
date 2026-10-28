@@ -92,8 +92,8 @@ pub struct RecvBuf {
     // we rely on the invariance that we never buffer more than u32::MAX amount of data
     base: u32,
     data: BTreeMap<u32, Vec<u8>>,
-    n_bytes: u16, // amount of bytes allocated for tracking our buffer
-    cap: u16,
+    n_bytes: u32, // amount of bytes allocated for tracking our buffer
+    cap: u32,
 }
 
 impl RecvBuf {
@@ -102,7 +102,7 @@ impl RecvBuf {
             base: 0,
             data: BTreeMap::new(),
             n_bytes: 0,
-            cap: cap as u16,
+            cap: cap as u32,
         }
     }
 
@@ -111,23 +111,28 @@ impl RecvBuf {
     }
 
     pub fn insert(&mut self, data: impl Into<Vec<u8>>, seq: u32) {
+        let data = data.into();
+        let (new_size, overflow) = self.n_bytes.overflowing_add(data.len() as u32);
+
+        assert!(new_size < self.cap);
+        assert!(
+            !overflow,
+            "we cant have more than u32::max bytes inside the buffer"
+        );
+
         if self.data.is_empty() {
             self.base = seq;
         }
 
-        let data = data.into();
-
-        assert!((self.n_bytes + data.len() as u16) < self.cap);
-
         match self.data.entry(self.key(seq)) {
             std::collections::btree_map::Entry::Vacant(vacant_entry) => {
-                self.n_bytes += data.len() as u16;
+                self.n_bytes += data.len() as u32;
 
                 vacant_entry.insert_entry(data);
             }
             std::collections::btree_map::Entry::Occupied(mut occupied_entry) => {
-                let d_len = data.len() as u16;
-                let old_len = occupied_entry.get().len() as u16;
+                let d_len = data.len() as u32;
+                let old_len = occupied_entry.get().len() as u32;
 
                 if old_len < d_len {
                     occupied_entry.insert(data);
@@ -139,16 +144,18 @@ impl RecvBuf {
         trace!(cur_size = self.n_bytes, "inserting into rcv buffer");
     }
 
-    pub fn pop_first(&mut self) -> Option<Vec<u8>> {
-        self.data
-            .first_key_value()
-            .map(|entry| *entry.0)
-            .and_then(|seg| self.pop(seg))
-    }
-
-    /// removes consecutive data from the buffer
+    /// removes consecutive data from the buffer starting at the provided seq number
+    ///
+    /// this should be calculated as rcv_next - buf.len()
     pub fn pop(&mut self, seq: u32) -> Option<Vec<u8>> {
         if self.data.is_empty() {
+            return None;
+        }
+
+        // we dont give out data that that has gaps in it
+        if let Some(lowest_seq) = self.seq_first()
+            && lowest_seq > seq
+        {
             return None;
         }
 
@@ -183,7 +190,7 @@ impl RecvBuf {
             debug_assert!(r.is_some());
         }
 
-        self.n_bytes -= data.len() as u16;
+        self.n_bytes -= data.len() as u32;
         Some(data)
     }
 
@@ -200,7 +207,7 @@ impl RecvBuf {
     }
 
     pub fn available_cap(&self) -> u16 {
-        self.cap - self.n_bytes
+        (self.cap - self.n_bytes) as u16
     }
 
     pub fn is_empty(&self) -> bool {

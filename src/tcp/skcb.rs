@@ -1,10 +1,9 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
-use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, trace};
 
 use super::sock::TCPCon;
 use crate::eth::ETH_FRAME_MAX_SIZE;
@@ -206,6 +205,13 @@ impl SKCB {
         )
     }
 
+    fn try_send(&mut self) -> Result<Option<u16>> {
+        if !matches!(self.status, TCPState::Established | TCPState::CloseWait) {
+            return Ok(None);
+        }
+        todo!()
+    }
+
     /// updates the control block
     fn update_tcb(&mut self, seg: &Packet<TCP>) {
         let ip_hdr = seg.ip_hdr();
@@ -229,12 +235,9 @@ impl SKCB {
         opts: TCPOpts,
         tcp_pay: &[u8],
     ) -> Result<()> {
-        debug!(%tcp_hdr, "sending packet");
+        debug!(%tcp_hdr, "sending packet out");
 
         let con = self.con();
-        if matches!(self.status, TCPState::Established | TCPState::CloseWait) {
-            // send remaining data
-        }
         let packet = Packet::<TCP>::new(con.local_ip, con.remote_ip, tcp_hdr, opts, tcp_pay);
         self.out_chan.send(packet).await.unwrap();
         Ok(())
