@@ -1,5 +1,5 @@
 use std::default;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 use bytes::BufMut;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16, U32};
@@ -271,6 +271,16 @@ impl Packet<TCP> {
         IPv4Hdr::ref_from_prefix(&self.as_buf()[IP_HDR_OFFSET..])
             .expect("get ip hdr: the packet is parsed")
             .0
+    }
+
+    /// destination socket addr
+    pub fn d_addr(&self) -> SocketAddrV4 {
+        SocketAddrV4::new(self.ip_hdr().dip(), self.hdr().dport.get())
+    }
+
+    /// source socket addr
+    pub fn s_addr(&self) -> SocketAddrV4 {
+        SocketAddrV4::new(self.ip_hdr().sip(), self.hdr().sport.get())
     }
 
     /// retrieves the the IP payload

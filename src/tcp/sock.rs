@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::sync::{mpsc::Sender, oneshot};
 
 use crate::{
@@ -55,6 +55,7 @@ pub async fn no_socket_found(seg: Packet<TCP>, sender: &Sender<Packet<IP>>) {
         .unwrap();
 }
 
+/// a handle to a socket 
 pub struct Socket {
     sender: Sender<SocketMessage>,
     worker_handle: tokio::task::JoinHandle<()>,
@@ -104,8 +105,22 @@ impl Socket {
             .map_err(|e| SocketError(format!("error when calling socket: {e}")))
     }
 
+    /// if this returns true the socket should be deallocated
     pub fn is_closed(&self) -> bool {
         self.worker_handle.is_finished()
+    }
+
+    pub async fn status(&self) -> TCPState {
+        if self.is_closed() {
+            return TCPState::Closed;
+        }
+
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(SocketMessage::Status(tx))
+            .await
+            .expect("the tcp isnt closed so this should work");
+        rx.await.expect("the sender cant be dropped")
     }
 }
 
@@ -137,6 +152,7 @@ pub enum SocketMessage {
     Close,
     Send(Vec<u8>),
     Receive(oneshot::Sender<Vec<u8>>),
+    Status(oneshot::Sender<TCPState>),
 
     /// incoming packet
     Segment(Packet<TCP>),

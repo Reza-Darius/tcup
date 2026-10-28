@@ -809,6 +809,7 @@ dependencies = [
  "rtnetlink",
  "rustix",
  "siphasher",
+ "slab",
  "test-log",
  "thiserror",
  "time",

@@ -9,3 +9,5 @@ mod skcb;
 pub mod sock;
 mod tcp_packet;
 mod timer;
+
+pub use skcb::TCPState;

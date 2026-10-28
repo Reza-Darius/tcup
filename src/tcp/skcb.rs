@@ -152,6 +152,10 @@ impl SKCB {
             }
             SocketMessage::Receive(sender) => todo!(),
             SocketMessage::Send(data) => todo!(),
+            SocketMessage::Status(sender) => {
+                sender.send(self.status).expect("the rcv cant be closed");
+                return Ok(());
+            }
         };
 
         match event {
@@ -195,6 +199,13 @@ impl SKCB {
             .min(self.tcb.snd_wnd as u32)
     }
 
+    pub(super) fn is_synchronized(&self) -> bool {
+        !matches!(
+            self.status,
+            TCPState::Listen | TCPState::SynSent | TCPState::Closed
+        )
+    }
+
     /// updates the control block
     fn update_tcb(&mut self, seg: &Packet<TCP>) {
         let ip_hdr = seg.ip_hdr();
@@ -218,6 +229,8 @@ impl SKCB {
         opts: TCPOpts,
         tcp_pay: &[u8],
     ) -> Result<()> {
+        debug!(%tcp_hdr, "sending packet");
+
         let con = self.con();
         if matches!(self.status, TCPState::Established | TCPState::CloseWait) {
             // send remaining data
@@ -231,17 +244,12 @@ impl SKCB {
     ///
     /// can also serve as challenge ack
     pub(super) async fn send_ack(&self) -> Result<()> {
-        trace!("sending ack");
-
         let mut tcp_hdr = self.hdr_t();
         tcp_hdr.set_ack();
         self.output(tcp_hdr, TCPOpts::default(), &[]).await
     }
 
     pub(super) async fn send_fin(&mut self) -> Result<()> {
-        trace!("sending fin");
-
-        // sending our own FIN
         let mut tcp_hdr = self.hdr_t();
 
         // FIN takes one seq number
@@ -252,9 +260,6 @@ impl SKCB {
     }
 
     pub(super) async fn send_fin_ack(&mut self) -> Result<()> {
-        trace!("sending fin ack");
-
-        // sending our own FIN
         let mut tcp_hdr = self.hdr_t();
 
         // FIN takes one seq number
@@ -266,16 +271,8 @@ impl SKCB {
         self.output(tcp_hdr, TCPOpts::default(), &[]).await
     }
 
-    pub(super) async fn send_rst(&self, tcp_hdr: &TCPHdr) -> Result<()> {
-        trace!("sending reset");
-
+    pub(super) async fn send_rst(&self) -> Result<()> {
         let inner = &self.inner;
-
-        if tcp_hdr.is_rst() {
-            warn!("cant respond to RST with RST");
-            return Ok(());
-        }
-
         let mut tcp_hdr = self.hdr_t();
 
         tcp_hdr.set_rst();

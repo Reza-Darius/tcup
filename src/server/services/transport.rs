@@ -1,10 +1,14 @@
 use std::{collections::HashMap, net::SocketAddrV4};
 
+use slab::Slab;
 use tokio::sync::mpsc::Sender;
 use tracing::error;
 
 use crate::{
-    tcp::sock::{Socket, SocketMessage, TCPCall, TCPCon, no_socket_found},
+    tcp::{
+        TCPState,
+        sock::{Socket, SocketMessage, TCPCall, TCPCon, no_socket_found},
+    },
     utils::packet::{IP, Packet, TCP},
 };
 
@@ -17,8 +21,10 @@ struct TCPServiceV1 {
     ip_svc: Sender<Packet<IP>>,
 
     /// connection table
-    con_table: HashMap<TCPCon, Socket>,
-    listen_table: HashMap<SocketAddrV4, Socket>,
+    socket_table: Slab<Socket>,
+
+    con_table: HashMap<TCPCon, usize>,
+    listen_table: HashMap<SocketAddrV4, usize>,
 }
 
 impl TransportService for TCPServiceV1 {
@@ -35,23 +41,46 @@ impl TransportService for TCPServiceV1 {
 }
 
 impl TCPServiceV1 {
+    pub fn new() -> Self {
+        todo!()
+    }
+
     async fn new_listen(&mut self, addr: SocketAddrV4) {
         let sock = Socket::listen(self.ip_svc.clone(), addr, 100);
-        self.listen_table.insert(addr, sock);
+        let key = self.socket_table.insert(sock);
+        self.listen_table.insert(addr, key);
     }
 
     async fn service_segment(&mut self, segment: Packet<TCP>) {
         let con = segment.con();
+        let addr = SocketAddrV4::new(con.remote_ip, con.remote_port);
 
-        if let Some(socket) = self.con_table.get(&con) {
-            if socket.is_closed() {
-                no_socket_found(segment, &self.ip_svc).await;
-                self.con_table.remove(&con);
-            } else if let Err(e) = socket.call(SocketMessage::Segment(segment)).await {
-                error!(%e, "socket call error");
-            };
-        } else {
+        let Some(socket) = self
+            .con_table
+            .get(&con)
+            .or_else(|| self.listen_table.get(&addr))
+            .and_then(|&key| self.socket_table.get(key))
+        else {
             no_socket_found(segment, &self.ip_svc).await;
+            return;
+        };
+
+        match socket.call(SocketMessage::Segment(segment)).await {
+            Ok(_) => {
+                match socket.status().await {
+                    TCPState::Closed => {
+                        self.con_table.remove(&con);
+                    }
+                    TCPState::Listen => {
+                        // move to listen table
+                        let sock = self.con_table.remove(&con).unwrap();
+                        self.listen_table
+                            .insert(SocketAddrV4::new(con.remote_ip, con.remote_port), sock);
+                    }
+                    _ => {}
+                }
+            }
+            Err(e) => error!(%e, "socket call error"),
         }
     }
 }

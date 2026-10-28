@@ -6,7 +6,6 @@ use super::error::TCPError;
 use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::tcp::error::TCPError::HandlerError;
 use crate::tcp::seq::*;
-use crate::tcp::skcb::TCPState::Listen;
 use crate::tcp::tcp_packet::{TCP_SEG_MAX_SIZE, TCPPayload};
 use crate::tcp::{
     opts::TCPOpts,
@@ -30,11 +29,20 @@ type Result<T> = std::result::Result<T, TCPError>;
 /// dispatch the correct handler for a segment event
 #[instrument(skip_all, fields(state = ?skcb.status))]
 pub async fn seg_handler(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
-    // these behaviours are mostly the same across states so we can handle them right here
+    // these behaviours are the same across synchronize states so we can handle them right here
     let hdr = seg.hdr();
-    if handle_rst(skcb, hdr).await || handle_syn(skcb, hdr).await || handle_ack(skcb, hdr).await {
-        return Ok(());
-    };
+    if skcb.is_synchronized() {
+        if !skcb.check_seq() {
+            if !hdr.is_rst() {
+                skcb.send_ack().await?;
+            }
+            return Ok(());
+        }
+
+        if handle_rst(skcb, hdr).await || handle_syn(skcb, hdr).await || !hdr.is_ack() {
+            return Ok(());
+        };
+    }
 
     match skcb.status {
         TCPState::Listen => listen(skcb, seg).await?,
@@ -58,32 +66,18 @@ async fn handle_rst(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
         return false;
     }
 
-    match skcb.status {
-        TCPState::Listen => {}
-        TCPState::SynSent => {
-            if !skcb.check_ack(hdr) {
-                return true;
+    if matches!(skcb.status, TCPState::SynReceived) {
+        match skcb.open {
+            Open::Passive => {
+                skcb.change_state(TCPState::Listen);
             }
-            skcb.change_state(TCPState::Closed);
-        }
-        TCPState::SynReceived => {
-            match skcb.open {
-                Open::Passive => {
-                    skcb.change_state(TCPState::Listen);
-                }
-                // our connection was refused
-                Open::Active => {
-                    skcb.change_state(TCPState::Closed);
-                }
-            };
-            skcb.snd_buf.clear();
-            skcb.rcv_buf.clear();
-        }
-        _ => {
-            skcb.change_state(TCPState::Closed);
-        }
+            Open::Active => {
+                skcb.change_state(TCPState::Closed);
+            }
+        };
+    } else {
+        skcb.change_state(TCPState::Closed);
     }
-
     true
 }
 
@@ -93,48 +87,18 @@ async fn handle_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
         return false;
     }
 
-    match skcb.status {
-        TCPState::SynReceived => {
-            match skcb.open {
-                Open::Passive => {
-                    skcb.change_state(TCPState::Listen);
-                }
-                Open::Active => {
-                    skcb.change_state(TCPState::Closed);
-                }
-            };
-            skcb.snd_buf.clear();
-            skcb.rcv_buf.clear();
-            true
-        }
-        // see the corresponding handler for syn handling
-        TCPState::SynSent | Listen => false,
-        _ => {
-            // in synchronized state: send challenge ack and drop the segment
-            skcb.send_ack().await.unwrap();
-            true
-        }
-    }
-}
-
-/// returns true if the segment should be dropped
-async fn handle_ack(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
-    match (hdr.is_ack(), skcb.status) {
-        (true, TCPState::Listen) => {
-            skcb.send_rst(hdr).await.unwrap();
-            true
-        }
-        (true, TCPState::SynSent) => {
-            if seq_lte(skcb.tcb.seg_ack, skcb.tcb.iss) || seq_gt(skcb.tcb.seg_ack, skcb.tcb.snd_nxt)
-            {
-                skcb.send_rst(hdr).await.unwrap();
+    if matches!(skcb.status, TCPState::SynReceived) {
+        match skcb.open {
+            Open::Passive => {
+                skcb.change_state(TCPState::Listen);
                 true
-            } else {
-                false
             }
-        }
-        // in all other cases we drop the segment if its not ACK
-        _ => !hdr.is_ack(),
+            Open::Active => false,
+        };
+    } else {
+        // challenge ACK
+        skcb.send_ack().await.unwrap();
+        true
     }
 }
 
@@ -190,15 +154,21 @@ pub async fn active_open(skcb: &mut SKCB) -> Result<()> {
 async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     let seg_hdr = seg.hdr();
 
-    if seg_hdr.is_fin() {
-        return Err(HandlerError("cant process fin segment".to_string()));
+    if seg_hdr.is_rst() {
+        return Err(HandlerError("got rst in listen".to_string()));
+    }
+
+    if seg_hdr.is_ack() {
+        return skcb.send_rst().await;
+    }
+
+    if !seg_hdr.is_syn() {
+        return Err(HandlerError("didnt get syn in listen".to_string()));
     }
 
     let con = seg.con();
     skcb.r_addr = con.remote_ip;
     skcb.r_port = con.remote_port;
-
-    debug!("req TCP:\n{}", seg_hdr);
 
     // configure initial sequence numbers
     skcb.tcb.iss = new_isn(&skcb.con());
@@ -223,7 +193,7 @@ async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     };
 
     let opts = TCPOpts {
-        mss: Some(1460),
+        mss: Some(TCP_SEG_MAX_SIZE as u16),
         ..Default::default()
     };
 
@@ -257,15 +227,10 @@ async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
 /// event handler for SYN RECEIVED state
 async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
-    if !skcb.check_seq() {
-        return skcb.send_ack().await;
-    };
-
     let hdr = seg.hdr();
 
     // SND.UNA < SEG.ACK <= SND.NXT
     if seq_lt(skcb.tcb.snd_una, skcb.tcb.seg_ack) && seq_lte(skcb.tcb.seg_ack, skcb.tcb.snd_nxt) {
-        // ACK packets dont carry data so the windows doesnt advance
         skcb.tcb.snd_wnd = skcb.tcb.seg_wnd;
         skcb.tcb.snd_wl1 = skcb.tcb.seg_seq;
         skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
@@ -279,8 +244,7 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         debug!("connection established!");
         skcb.change_state(TCPState::Established);
 
-        // TODO: place any data that accompanies this ack into the buffer
-        return Ok(());
+        return established(skcb, seg).await;
     } else {
         let mut tcp_hdr = TCPHdr {
             sport: skcb.l_port.into(),
@@ -308,6 +272,26 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 /// event handler for SYN SENT state
 async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     let seg_hdr = seg.hdr();
+
+    if seg_hdr.is_ack() {
+        if seg_hdr.is_rst() {
+            return Ok(());
+        }
+
+        if seq_lte(skcb.tcb.seg_ack, skcb.tcb.iss) || seq_gt(skcb.tcb.seg_ack, skcb.tcb.snd_nxt) {
+            skcb.send_rst().await.unwrap();
+        }
+        // we dont support data on SYN
+        return Ok(());
+    }
+
+    if seg_hdr.is_rst() {
+        if skcb.check_ack(seg_hdr) {
+            skcb.change_state(TCPState::Closed);
+        }
+        return Ok(());
+    }
+
     if seg_hdr.is_fin() {
         return Err(HandlerError("cant process fin segment".to_string()));
     }
@@ -324,9 +308,8 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
                 skcb.change_state(TCPState::Established);
                 skcb.send_ack().await?;
             }
-
         } else {
-            // simultaneous open path
+            // simultaneous open path: we got a syn but not ack in response to our syn
             skcb.tcb.snd_wnd = skcb.tcb.seg_wnd;
             skcb.tcb.snd_wl1 = skcb.tcb.seg_seq;
             skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
@@ -563,24 +546,6 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
     }
 
     Ok(ackd)
-}
-
-/// helper functon for checking the send window
-fn check_snd_window(skcb: &mut SKCB) {
-    // shorthand variables
-    let snd_una = skcb.tcb.snd_una;
-    let seg_ack = skcb.tcb.seg_ack;
-    let seg_seq = skcb.tcb.seg_seq;
-    let snd_nxt = skcb.tcb.snd_nxt;
-
-    // update send window
-    if seq_lt(skcb.tcb.snd_wl1, seg_seq)
-        || (skcb.tcb.snd_wl1 == seg_seq && seq_lte(skcb.tcb.snd_wl2, seg_ack))
-    {
-        skcb.tcb.snd_wnd = skcb.tcb.seg_wnd;
-        skcb.tcb.snd_wl1 = seg_seq;
-        skcb.tcb.snd_wl2 = seg_ack;
-    }
 }
 
 enum AcceptResult {
