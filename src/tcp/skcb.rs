@@ -1,12 +1,13 @@
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::SocketAddrV4;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::Receiver;
 use tracing::{debug, error, trace};
 
 use super::sock::TCPCon;
 use crate::eth::ETH_FRAME_MAX_SIZE;
+use crate::server::services::arp_svc::ARPServiceHandle;
 use crate::tcp::buffer::{RecvBuf, SendBuf};
 use crate::tcp::error::TCPError::{self};
 use crate::tcp::handler::seg_handler;
@@ -18,7 +19,7 @@ use crate::tcp::{
     tcp_packet::{TCPFlags, TCPHdr},
     timer::TIME_WAIT,
 };
-use crate::utils::packet::{IP, Packet, TCP};
+use crate::utils::packet::{Packet, TCP};
 
 pub const WRD_SIZE: usize = 4;
 
@@ -30,7 +31,6 @@ pub const SND_RCV_BUF_SIZE: u16 = 10000;
 type Result<T> = std::result::Result<T, TCPError>;
 
 // this is just a wrapper, see below for the real meat and potatoes
-#[derive(Debug)]
 pub struct SKCB {
     inner: Box<SKCBInner>,
 }
@@ -49,13 +49,9 @@ impl DerefMut for SKCB {
     }
 }
 
-#[derive(Debug)]
 pub struct SKCBInner {
-    pub l_addr: Ipv4Addr,
-    pub l_port: u16,
-
-    pub r_addr: Ipv4Addr,
-    pub r_port: u16,
+    pub l_addr: SocketAddrV4,
+    pub r_addr: Option<SocketAddrV4>,
 
     pub status: TCPState,
     pub tcb: TCB,
@@ -64,7 +60,7 @@ pub struct SKCBInner {
     /// communication channel for receiving TCP data and user calls
     pub in_chan: Receiver<SocketMessage>,
     /// sender for giving out IP packets to be handled by lower layer
-    pub out_chan: Sender<Packet<IP>>,
+    pub out_chan: ARPServiceHandle,
 
     /// buffer for outgoing data
     pub snd_buf: SendBuf,
@@ -78,10 +74,72 @@ pub enum Open {
     Active,
 }
 
+/// transmission control block
+#[derive(Debug, Default)]
+pub struct TCB {
+    /// unacknowledged data in flight
+    pub snd_una: u32,
+    /// data that could be sent, usually the seq in the reply
+    pub snd_nxt: u32,
+    /// window size (upper limit) = UNA + window size
+    pub snd_wnd: u16,
+    /// segment sequence number used for last window update
+    pub snd_wl1: u32,
+    /// segment acknowledgment number used for last window update
+    pub snd_wl2: u32,
+
+    /// next byte to receive, incrementing this is equivalent to ACKing data in the response
+    pub rcv_nxt: u32,
+    /// future seq number not yet allowed (upper limit)
+    pub rcv_wnd: u16,
+
+    /// initial send sequence number
+    pub iss: u32,
+    /// initial receive sequence number
+    pub irs: u32,
+
+    /// sequence number of the current segment
+    pub seg_seq: u32,
+    /// acknowledgment number of the current segment
+    pub seg_ack: u32,
+    /// len of the payload of the current segment
+    pub seg_len: u32,
+    /// advertised window of the current segment
+    pub seg_wnd: u16,
+
+    /// last sequence number of a segment
+    pub last_seq: u32,
+
+    pub snd_opts: TCPOpts,
+    pub rcv_opts: TCPOpts,
+
+    pub last_snd: Option<Instant>,
+    pub last_rcv: Option<Instant>,
+    pub rto: RTO,
+}
+
+// https://datatracker.ietf.org/doc/html/rfc9293#name-state-machine-overview
+#[derive(Debug, Clone, Copy, Default)]
+pub enum TCPState {
+    SynSent,
+    SynReceived,
+    Established,
+    FinWait1,
+    FinWait2,
+    CloseWait,
+    Closing,
+    LastAck,
+    Listen,
+    TimeWait,
+
+    #[default]
+    Closed,
+}
+
 impl SKCB {
     pub(super) fn new(
         rx: Receiver<SocketMessage>,
-        tx: Sender<Packet<IP>>,
+        tx: ARPServiceHandle,
         addr: SocketAddrV4,
     ) -> Self {
         let mut skcb = SKCB {
@@ -96,11 +154,8 @@ impl SKCB {
                 rcv_buf: RecvBuf::new(SND_RCV_BUF_SIZE as usize),
                 status: TCPState::Closed,
 
-                l_addr: *addr.ip(),
-                l_port: addr.port(),
-
-                r_addr: Ipv4Addr::new(0, 0, 0, 0),
-                r_port: 0,
+                l_addr: addr,
+                r_addr: None,
             }),
         };
 
@@ -143,35 +198,28 @@ impl SKCB {
     }
 
     async fn handle_user_call(&mut self, message: SocketMessage) -> Result<()> {
-        let event = match message {
+        match message {
             SocketMessage::Close => todo!(),
             SocketMessage::Segment(packet) => {
                 self.update_tcb(&packet);
-                TCPEvent::Seg(packet)
+                seg_handler(self, packet).await?;
             }
             SocketMessage::Receive(sender) => todo!(),
             SocketMessage::Send(data) => todo!(),
             SocketMessage::Status(sender) => {
                 sender.send(self.status).expect("the rcv cant be closed");
-                return Ok(());
             }
         };
 
-        match event {
-            TCPEvent::Timeout => todo!(),
-            TCPEvent::Seg(packet) => seg_handler(self, packet).await,
-            TCPEvent::Send(items) => todo!(),
-            TCPEvent::Close => todo!(),
-            TCPEvent::Abort => todo!(),
-        }
+        Ok(())
     }
 
     /// a template for a header
     #[inline(always)]
     fn hdr_t(&self) -> TCPHdr {
         TCPHdr {
-            sport: self.l_port.into(),
-            dport: self.r_port.into(),
+            sport: self.l_addr.port().into(),
+            dport: self.r_addr.unwrap().port().into(),
             seq: self.tcb.snd_nxt.into(),
             ack: self.tcb.rcv_nxt.into(),
             flags: TCPFlags::default(),
@@ -182,10 +230,10 @@ impl SKCB {
 
     pub fn con(&self) -> TCPCon {
         TCPCon {
-            local_ip: self.l_addr,
-            local_port: self.l_port,
-            remote_ip: self.r_addr,
-            remote_port: self.r_port,
+            local_ip: *self.l_addr.ip(),
+            local_port: self.l_addr.port(),
+            remote_ip: *self.r_addr.unwrap().ip(),
+            remote_port: self.r_addr.unwrap().port(),
         }
     }
 
@@ -239,7 +287,7 @@ impl SKCB {
 
         let con = self.con();
         let packet = Packet::<TCP>::new(con.local_ip, con.remote_ip, tcp_hdr, opts, tcp_pay);
-        self.out_chan.send(packet).await.unwrap();
+        self.out_chan.send(packet.into()).await;
         Ok(())
     }
 
@@ -379,50 +427,6 @@ impl SKCB {
     }
 }
 
-/// transmission control block
-#[derive(Debug, Default)]
-pub struct TCB {
-    /// unacknowledged data in flight
-    pub snd_una: u32,
-    /// data that could be sent, usually the seq in the reply
-    pub snd_nxt: u32,
-    /// window size (upper limit) = UNA + window size
-    pub snd_wnd: u16,
-    /// segment sequence number used for last window update
-    pub snd_wl1: u32,
-    /// segment acknowledgment number used for last window update
-    pub snd_wl2: u32,
-
-    /// next byte to receive, incrementing this is equivalent to ACKing data in the response
-    pub rcv_nxt: u32,
-    /// future seq number not yet allowed (upper limit)
-    pub rcv_wnd: u16,
-
-    /// initial send sequence number
-    pub iss: u32,
-    /// initial receive sequence number
-    pub irs: u32,
-
-    /// sequence number of the current segment
-    pub seg_seq: u32,
-    /// acknowledgment number of the current segment
-    pub seg_ack: u32,
-    /// len of the payload of the current segment
-    pub seg_len: u32,
-    /// advertised window of the current segment
-    pub seg_wnd: u16,
-
-    /// last sequence number of a segment
-    pub last_seq: u32,
-
-    pub snd_opts: TCPOpts,
-    pub rcv_opts: TCPOpts,
-
-    pub last_snd: Option<Instant>,
-    pub last_rcv: Option<Instant>,
-    pub rto: RTO,
-}
-
 impl std::fmt::Display for TCB {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -453,33 +457,4 @@ impl std::fmt::Display for TCB {
             self.seg_len,
         )
     }
-}
-
-// https://datatracker.ietf.org/doc/html/rfc9293#name-state-machine-overview
-#[derive(Debug, Clone, Copy, Default)]
-pub enum TCPState {
-    SynSent,
-    SynReceived,
-    Established,
-    FinWait1,
-    FinWait2,
-    CloseWait,
-    Closing,
-    LastAck,
-    Listen,
-    TimeWait,
-
-    #[default]
-    Closed,
-}
-
-/// event type that the TCP loop reacts to
-#[derive(Debug)]
-pub enum TCPEvent {
-    Timeout,
-    Seg(Packet<TCP>),
-
-    Send(Vec<u8>),
-    Close,
-    Abort,
 }

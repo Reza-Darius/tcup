@@ -1,8 +1,9 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::sync::{mpsc::Sender, oneshot};
-use tracing::{error, warn};
+use tracing::error;
 
 use crate::{
+    server::services::arp_svc::ARPServiceHandle,
     tcp::{
         error::TCPError::{self, SocketError},
         handler::active_open,
@@ -14,7 +15,7 @@ use crate::{
 };
 
 /// call this for getting a packet addressed to a non existing socket
-pub async fn no_socket_found(seg: Packet<TCP>, sender: &Sender<Packet<IP>>) {
+pub async fn no_socket_found(seg: Packet<TCP>) -> Option<Packet<IP>> {
     // when a packet arrives for a non existing socket
     // all data in the incoming segment is discarded. An incoming segment containing a RST is discarded. An incoming segment not containing a RST causes a RST to be sent in response. The acknowledgment and sequence field values are selected to make the reset sequence acceptable to the TCP endpoint that sent the offending segment.
     //
@@ -28,7 +29,7 @@ pub async fn no_socket_found(seg: Packet<TCP>, sender: &Sender<Packet<IP>>) {
     let hdr = seg.hdr();
 
     if hdr.is_rst() {
-        return;
+        return None;
     }
 
     let (seq, ack, flags) = if hdr.is_ack() {
@@ -44,16 +45,13 @@ pub async fn no_socket_found(seg: Packet<TCP>, sender: &Sender<Packet<IP>>) {
     let mut resp_hdr = TCPHdr::new(hdr.dport.get(), hdr.sport.get(), seq, hdr.seq.get(), flags);
     resp_hdr.ack = ack.into();
 
-    sender
-        .send(Packet::<TCP>::new(
-            ip_hdr.dip(),
-            ip_hdr.sip(),
-            resp_hdr,
-            TCPOpts::default(),
-            &[],
-        ))
-        .await
-        .unwrap();
+    Some(Packet::<TCP>::new(
+        ip_hdr.dip(),
+        ip_hdr.sip(),
+        resp_hdr,
+        TCPOpts::default(),
+        &[],
+    ))
 }
 
 /// a handle to a socket
@@ -64,7 +62,7 @@ pub struct Socket {
 
 impl Socket {
     /// creates a new listening socket
-    pub fn listen(tx: Sender<Packet<IP>>, addr: SocketAddrV4, chan_size: usize) -> Self {
+    pub fn listen(tx: ARPServiceHandle, addr: SocketAddrV4, chan_size: usize) -> Self {
         let (s_tx, s_rx) = tokio::sync::mpsc::channel(chan_size);
         let mut skcb = SKCB::new(s_rx, tx, addr);
 
@@ -82,14 +80,17 @@ impl Socket {
     }
 
     /// creates a new connection socket
-    pub fn connect(tx: Sender<Packet<IP>>, addr: SocketAddrV4, chan_size: usize) -> Self {
+    pub fn connect(
+        tx: ARPServiceHandle,
+        s_addr: SocketAddrV4,
+        r_add: SocketAddrV4,
+        chan_size: usize,
+    ) -> Self {
         let (s_tx, s_rx) = tokio::sync::mpsc::channel(chan_size);
-        let mut skcb = SKCB::new(s_rx, tx, addr);
+        let mut skcb = SKCB::new(s_rx, tx, s_addr);
 
         let handle = tokio::spawn(async move {
-            // TODO: set up addresses
-
-            active_open(&mut skcb).await.unwrap();
+            active_open(&mut skcb, r_add).await.unwrap();
             skcb.run().await.unwrap();
         });
 

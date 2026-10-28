@@ -1,6 +1,7 @@
 use std::assert_matches;
+use std::net::SocketAddrV4;
 
-use tracing::instrument;
+use tracing::{instrument, trace};
 
 use super::error::TCPError;
 use crate::eth::ETH_FRAME_MAX_SIZE;
@@ -64,6 +65,8 @@ pub async fn seg_handler(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
 /// determines whether the segment should be dropped and possible state change
 async fn handle_sync_rst(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
+    trace!("chcking rst in sync state");
+
     if !hdr.is_rst() {
         return false;
     }
@@ -85,6 +88,8 @@ async fn handle_sync_rst(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
 
 /// returns true if the segment should be dropped
 async fn handle_sync_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
+    trace!("chcking syn in sync state");
+
     if !hdr.is_syn() {
         return false;
     }
@@ -105,7 +110,7 @@ async fn handle_sync_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
 }
 
 /// response to connect call, actively opening a connection
-pub async fn active_open(skcb: &mut SKCB) -> Result<()> {
+pub async fn active_open(skcb: &mut SKCB, remote_addr: SocketAddrV4) -> Result<()> {
     assert_matches!(
         skcb.status,
         TCPState::Closed,
@@ -113,6 +118,7 @@ pub async fn active_open(skcb: &mut SKCB) -> Result<()> {
     );
 
     skcb.open = Open::Active;
+    skcb.r_addr = Some(remote_addr);
 
     // configure initial sequence numbers
     skcb.tcb.iss = new_isn(&skcb.con());
@@ -127,8 +133,8 @@ pub async fn active_open(skcb: &mut SKCB) -> Result<()> {
     skcb.tcb.snd_nxt = skcb.tcb.iss + 1;
 
     let mut tcp_hdr = TCPHdr {
-        sport: skcb.l_port.into(),
-        dport: skcb.r_port.into(),
+        sport: skcb.l_addr.port().into(),
+        dport: skcb.r_addr.unwrap().port().into(),
         seq: skcb.tcb.iss.into(),
         ack: 0.into(),
         flags: TCPFlags::default(),
@@ -157,22 +163,27 @@ async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     let seg_hdr = seg.hdr();
 
     if seg_hdr.is_rst() {
+        trace!("dropping segment: rst check failed");
+
         return Err(HandlerError("got rst in listen".to_string()));
     }
 
     if seg_hdr.is_ack() {
+        trace!("dropping segment: ack check failed");
+
         return skcb.send_rst().await;
     }
 
     if !seg_hdr.is_syn() {
+        trace!("dropping segment: syn check failed");
+
         return Err(HandlerError("didnt get syn in listen".to_string()));
     }
 
     // passive open:
 
     let con = seg.con();
-    skcb.r_addr = con.remote_ip;
-    skcb.r_port = con.remote_port;
+    skcb.r_addr = Some(SocketAddrV4::new(con.local_ip, con.local_port));
 
     // configure initial sequence numbers
     skcb.tcb.iss = new_isn(&skcb.con());
@@ -187,8 +198,8 @@ async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     skcb.tcb.snd_nxt = skcb.tcb.iss.wrapping_add(1);
 
     let mut tcp_hdr = TCPHdr {
-        sport: skcb.l_port.into(),
-        dport: skcb.r_port.into(),
+        sport: skcb.l_addr.port().into(),
+        dport: skcb.r_addr.unwrap().port().into(),
         seq: skcb.tcb.iss.into(),
         ack: skcb.tcb.rcv_nxt.into(), // ACKing the irs
         flags: TCPFlags::default(),
@@ -250,8 +261,8 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         return established(skcb, seg).await;
     } else {
         let mut tcp_hdr = TCPHdr {
-            sport: skcb.l_port.into(),
-            dport: skcb.r_port.into(),
+            sport: skcb.l_addr.port().into(),
+            dport: skcb.r_addr.unwrap().port().into(),
             seq: skcb.tcb.seg_ack.into(),
             ack: skcb.tcb.rcv_nxt.into(),
             flags: TCPFlags::default(),
@@ -318,8 +329,8 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
             skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
 
             let mut tcp_hdr = TCPHdr {
-                sport: skcb.l_port.into(),
-                dport: skcb.r_port.into(),
+                sport: skcb.l_addr.port().into(),
+                dport: skcb.r_addr.unwrap().port().into(),
                 seq: skcb.tcb.iss.into(),
                 ack: skcb.tcb.rcv_nxt.into(), // ACKing the irs
                 flags: TCPFlags::default(),

@@ -3,7 +3,11 @@ use std::net::{IpAddr, Ipv4Addr};
 use crate::{
     eth::EthPayload,
     ip::Ipv4Payload,
-    server::services::{arp_svc::ARPService, tap_svc::TAPActorHandle},
+    server::services::{
+        arp_svc::{ARPService, ARPServiceHandle},
+        tap_svc::TAPActorHandle,
+        transport::TCPServiceV1,
+    },
     tap::device::TAPDeviceOptions,
     utils::packet::{ETH, IP, Packet},
 };
@@ -13,7 +17,8 @@ use tracing::{debug, info, instrument};
 pub struct TcupServer {
     virt_host: Ipv4Addr,
     link_svc: TAPActorHandle,
-    arp_svc: ARPService,
+    arp_svc: ARPServiceHandle,
+    trans_svc: TCPServiceV1,
 }
 
 impl TcupServer {
@@ -35,7 +40,8 @@ impl TcupServer {
         Ok(TcupServer {
             virt_host: virt_addr,
             link_svc: tap,
-            arp_svc: arp,
+            arp_svc: arp.clone(),
+            trans_svc: TCPServiceV1::new(arp),
         })
     }
 
@@ -60,7 +66,7 @@ impl TcupServer {
 
         match payload {
             EthPayload::Arp(packet) => {
-                self.arp_svc.service_arp(packet).await;
+                self.arp_svc.send(packet.into()).await;
                 debug!("sent ARP reply");
             }
             EthPayload::Ip(packet) => {
@@ -84,7 +90,7 @@ impl TcupServer {
         match payload {
             Ipv4Payload::Icmp(packet) => {
                 if let Some(reply) = packet.service(hdr.sip(), hdr.dip()) {
-                    self.arp_svc.service_ip(reply).await;
+                    self.arp_svc.send(reply.into()).await;
                     // // do we have an address?
                     // if let Some(mac_addr) = self.arp_svc.get_mac(hdr.sip()) {
                     //     // if yes, build eth frame and send it

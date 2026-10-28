@@ -10,5 +10,5 @@ pub mod sock;
 mod tcp_packet;
 mod timer;
 
-pub use skcb::TCPState;
 pub use error::TCPError;
+pub use skcb::TCPState;

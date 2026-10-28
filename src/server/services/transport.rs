@@ -4,15 +4,15 @@ use std::{
 };
 
 use slab::Slab;
-use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, instrument, trace};
 
 use crate::{
+    server::services::arp_svc::ARPServiceHandle,
     tcp::{
         TCPError, TCPState,
         sock::{Socket, TCPCall, TCPCon, no_socket_found},
     },
-    utils::packet::{IP, Packet, TCP},
+    utils::packet::{Packet, TCP},
 };
 
 pub trait TransportService {
@@ -21,9 +21,9 @@ pub trait TransportService {
     async fn service_request(&mut self, call: TCPCall) -> Result<(), Self::Error>;
 }
 
-struct TCPServiceV1 {
+pub struct TCPServiceV1 {
     /// sender to dump outgoing IP packets into
-    ip_svc: Sender<Packet<IP>>,
+    out_svc: ARPServiceHandle,
 
     socket_table: Slab<Socket>,
 
@@ -52,9 +52,9 @@ impl TransportService for TCPServiceV1 {
 }
 
 impl TCPServiceV1 {
-    pub fn new(ip_svc: Sender<Packet<IP>>) -> Self {
+    pub fn new(out_svc: ARPServiceHandle) -> Self {
         Self {
-            ip_svc,
+            out_svc,
             socket_table: Slab::new(),
             con_table: HashMap::new(),
             listen_table: HashMap::new(),
@@ -69,7 +69,7 @@ impl TCPServiceV1 {
 
         debug!(%addr, "new listening socket");
 
-        let sock = Socket::listen(self.ip_svc.clone(), addr, 100);
+        let sock = Socket::listen(self.out_svc.clone(), addr, 100);
         let key = self.socket_table.insert(sock);
         self.listen_table.insert(addr, key);
 
@@ -95,7 +95,7 @@ impl TCPServiceV1 {
                 }
                 TCPState::Closed => {
                     self.con_table.remove(&seg_con);
-                    self.port_svc.free_port(seg_con.remote_port);
+                    self.port_svc.free(seg_con.remote_port);
                 }
                 _ => {}
             }
@@ -110,7 +110,9 @@ impl TCPServiceV1 {
         else {
             error!("no socket found");
 
-            no_socket_found(segment, &self.ip_svc).await;
+            if let Some(resp) = no_socket_found(segment).await {
+                self.out_svc.send(resp.into()).await;
+            };
             return Err(TCPError::SocketError("no socket found".into()));
         };
 
@@ -122,7 +124,7 @@ impl TCPServiceV1 {
             // going from listening to closed should probably not happen
             TCPState::Closed => {
                 self.listen_table.remove(&listen_addr);
-                self.port_svc.free_port(listen_addr.port());
+                self.port_svc.free(listen_addr.port());
             }
             // move from listening to connection table
             TCPState::SynReceived => {
@@ -140,6 +142,8 @@ impl TCPServiceV1 {
 }
 
 /// This service manages occupied and free ports
+///
+/// OPTIMIZE: a bitmap approach is probably better
 struct PortService {
     freelist: VecDeque<u16>,
     taken: BTreeSet<u16>,
@@ -155,23 +159,25 @@ impl PortService {
         }
     }
 
-    fn request_port(&mut self) -> u16 {
+    /// requests a free port, this function panics if U16::MAX - 1000 ports are occupied
+    fn request(&mut self) -> u16 {
         if let Some(p) = self.freelist.pop_front() {
             return p;
         }
 
         if let Some(p) = self.taken.last().copied() {
-            assert!(p < u16::MAX);
+            assert!((Self::LOWEST_PORT..u16::MAX).contains(&p));
 
             self.taken.insert(p + 1);
-            return p + 1;
+            p + 1
+        } else {
+            self.taken.insert(Self::LOWEST_PORT);
+            Self::LOWEST_PORT
         }
-
-        self.taken.insert(Self::LOWEST_PORT);
-        Self::LOWEST_PORT
     }
 
-    fn free_port(&mut self, port: u16) {
+    /// returns port back to the pool
+    fn free(&mut self, port: u16) {
         assert!(port >= Self::LOWEST_PORT);
         assert!(self.taken.remove(&port));
 

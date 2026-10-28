@@ -6,8 +6,10 @@ use crate::{
 };
 use std::{collections::HashMap, net::Ipv4Addr};
 
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tracing::debug;
 
+#[derive(Debug)]
 struct ARPStore {
     map: HashMap<Ipv4Addr, Mac>,
     if_addr: (Mac, Ipv4Addr),
@@ -32,8 +34,38 @@ impl ARPTable for ARPStore {
     }
 }
 
+#[derive(Clone)]
+pub struct ARPServiceHandle {
+    sender: Sender<ARPServiceMessage>,
+}
+
+impl ARPServiceHandle {
+    pub async fn send(&self, msg: ARPServiceMessage) {
+        self.sender.send(msg).await;
+    }
+}
+
+#[derive(Debug)]
+pub enum ARPServiceMessage {
+    ARP(Packet<ARP>),
+    IP(Packet<IP>),
+}
+
+impl From<Packet<ARP>> for ARPServiceMessage {
+    fn from(value: Packet<ARP>) -> Self {
+        ARPServiceMessage::ARP(value)
+    }
+}
+
+impl From<Packet<IP>> for ARPServiceMessage {
+    fn from(value: Packet<IP>) -> Self {
+        ARPServiceMessage::IP(value)
+    }
+}
+
 // TODO: retry pending arp requests
 // TODO: deal with stale entries
+#[derive(Debug)]
 pub struct ARPService {
     link_sink: Sender<TAPActorMessage>,
     arp_queue: HashMap<Ipv4Addr, Vec<Packet<IP>>>,
@@ -41,15 +73,25 @@ pub struct ARPService {
 }
 
 impl ARPService {
-    pub fn new(if_mac: Mac, if_addr: Ipv4Addr, sender: Sender<TAPActorMessage>) -> Self {
-        ARPService {
+    pub fn new(
+        if_mac: Mac,
+        if_addr: Ipv4Addr,
+        sender: Sender<TAPActorMessage>,
+    ) -> ARPServiceHandle {
+        let (tx, rx) = channel(1024);
+
+        let svc = ARPService {
             link_sink: sender,
             arp_queue: HashMap::new(),
             store: ARPStore {
                 map: HashMap::new(),
                 if_addr: (if_mac, if_addr),
             },
-        }
+        };
+
+        tokio::spawn(async move { svc.run(rx).await });
+
+        ARPServiceHandle { sender: tx }
     }
 
     pub fn get_mac(&self, target_ip: Ipv4Addr) -> Option<Mac> {
@@ -60,7 +102,18 @@ impl ARPService {
         Packet::<ARP>::new_request(self.store.if_addr.0, self.store.if_addr.1, target_ip)
     }
 
-    pub async fn service_arp(&mut self, packet: Packet<ARP>) {
+    async fn run(mut self, mut rx: Receiver<ARPServiceMessage>) {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                ARPServiceMessage::ARP(packet) => self.service_arp(packet).await,
+                ARPServiceMessage::IP(packet) => self.service_ip(packet).await,
+            };
+        }
+
+        debug!("shutting down ARP service worker");
+    }
+
+    async fn service_arp(&mut self, packet: Packet<ARP>) {
         if let Some(event) = packet.service(&mut self.store) {
             match event {
                 crate::eth::ARPServiceResult::Reply(packet) => self.send_frame(packet).await,
@@ -78,7 +131,7 @@ impl ARPService {
         }
     }
 
-    pub async fn service_ip(&mut self, packet: Packet<IP>) {
+    async fn service_ip(&mut self, packet: Packet<IP>) {
         if let Some(mac) = self.get_mac(packet.dip()) {
             let frame = packet.to_eth(mac, self.store.if_addr.0);
             self.send_frame(frame).await;

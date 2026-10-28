@@ -8,7 +8,7 @@ use pin_project_lite::pin_project;
 use tokio::time::Instant;
 use tracing::trace;
 
-pub const RTO_START: u64 = 1000; // miliseconds
+pub const RTO_START: u64 = 1000; // one second in miliseconds
 pub const RTO_CAP: u64 = RTO_START * 60; // one minute
 
 /// awating this object drives the timer
@@ -23,6 +23,7 @@ impl RTO {
         let rto = Duration::from_millis(RTO_START);
         RTO {
             inner: Box::pin(RTOInner {
+                is_set: false,
                 first_measure: true,
                 srtt: Duration::from_millis(0),
                 rttvar: Duration::from_millis(0),
@@ -30,6 +31,12 @@ impl RTO {
                 sleep: tokio::time::sleep(rto),
             }),
         }
+    }
+
+    pub fn set(&mut self) {
+        self.reset();
+        let this = self.inner.as_mut().project();
+        *this.is_set = true;
     }
 
     /// doubles the RTO
@@ -56,7 +63,7 @@ impl RTO {
     }
 
     /// resets the timer to the current set RTO
-    pub fn reset_sleep(&mut self) {
+    pub fn reset(&mut self) {
         let this = self.inner.as_mut().project();
         this.sleep.reset(Instant::now() + *this.rto);
     }
@@ -66,7 +73,7 @@ impl RTO {
     /// a measurement should ONLY be taken for an ACK on a segment that wasnt retransmitted
     ///
     /// https://datatracker.ietf.org/doc/html/rfc6298#section-3
-    pub fn calc_rto(&mut self, sent: Instant, receive: Instant) {
+    pub fn update(&mut self, sent: Instant, receive: Instant) {
         let this = self.inner.as_mut().project();
         let rtt = receive - sent;
 
@@ -120,6 +127,8 @@ impl Default for RTO {
 pin_project! {
     #[derive(Debug)]
     struct RTOInner {
+        is_set: bool,
+
         first_measure: bool,
         srtt: Duration,
         rttvar: Duration,
@@ -135,13 +144,20 @@ impl Future for RTOInner {
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        match this.sleep.poll(cx) {
-            Poll::Ready(_) => {
-                trace!(?this.rto, "RTO fired after");
-                Poll::Ready(())
-            }
-            Poll::Pending => Poll::Pending,
+
+        if !*this.is_set {
+            return Poll::Pending;
         }
+
+        this.sleep.poll(cx)
+
+        // match this.sleep.poll(cx) {
+        //     Poll::Ready(_) => {
+        //         *this.is_set = false;
+        //         Poll::Ready(())
+        //     }
+        //     Poll::Pending => Poll::Pending,
+        // }
     }
 }
 
@@ -156,7 +172,7 @@ mod tests {
         let now = Instant::now();
         let sent = now - Duration::from_millis(100);
 
-        rto.calc_rto(sent, now);
+        rto.update(sent, now);
 
         let inner = rto.inner.as_ref();
         // RFC 6298 §2.2: SRTT ← R
@@ -178,10 +194,10 @@ mod tests {
         let mut rto = RTO::new(); // first_measure = true (after fix)
 
         let now = Instant::now();
-        rto.calc_rto(now - Duration::from_millis(100), now); // seed
+        rto.update(now - Duration::from_millis(100), now); // seed
 
         // Feed a second sample
-        rto.calc_rto(now - Duration::from_millis(120), now);
+        rto.update(now - Duration::from_millis(120), now);
 
         let inner = rto.inner.as_ref();
         // RTTVAR = 0.75·50 + 0.25·|100−120| = 37.5 + 5.0 = 42.5 ms
@@ -212,7 +228,7 @@ mod tests {
         //   rto = 800 + max(G, 1600) = 2400 ms  ← above the 1 s floor
         let mut rto = RTO::new();
         let now = Instant::now();
-        rto.calc_rto(now - Duration::from_millis(800), now);
+        rto.update(now - Duration::from_millis(800), now);
 
         assert!(
             rto.inner.rto > Duration::from_millis(RTO_START),
