@@ -45,7 +45,21 @@ impl TransportService for TCPServiceV1 {
             TCPCall::Listen(addr) => self.new_listen(addr).await,
             TCPCall::Close => todo!(),
             TCPCall::Send(items) => todo!(),
-            TCPCall::Receive(sender) => todo!(),
+            TCPCall::Receive((con, sender)) => {
+                debug!("servicing receive call");
+
+                if let Some(socket) = self
+                    .con_table
+                    .get(&con)
+                    .and_then(|sock_id| self.socket_table.get(*sock_id))
+                {
+                    socket
+                        .call(crate::tcp::socket::SocketMessage::Receive(sender))
+                        .await
+                } else {
+                    Err(TCPError::SocketError("socket not found".into()))
+                }
+            }
             TCPCall::Segment(packet) => self.service_segment(packet).await,
         }
     }
@@ -63,7 +77,7 @@ impl TCPServiceV1 {
     }
 
     async fn new_listen(&mut self, addr: SocketAddrV4) -> Result<(), TCPError> {
-        self.port_svc.insert(addr.port())?;
+        self.port_svc.register(addr.port())?;
 
         debug!(%addr, "new listening socket");
 
@@ -75,7 +89,7 @@ impl TCPServiceV1 {
     }
 
     // OPTIMIZE: we are requesting the status for every submitted packet, no bueno!
-    #[instrument(skip_all, fields(con = ?segment.con()))]
+    #[instrument(name = "TCPService", skip_all, fields(con = ?segment.con()))]
     async fn service_segment(&mut self, segment: Packet<TCP>) -> Result<(), TCPError> {
         let seg_con = segment.con();
         let listen_addr = SocketAddrV4::new(seg_con.local_ip, seg_con.local_port);
@@ -158,7 +172,7 @@ impl PortService {
         }
     }
 
-    fn insert(&mut self, port: u16) -> Result<(), TCPError> {
+    fn register(&mut self, port: u16) -> Result<(), TCPError> {
         if !self.taken.insert(port) {
             Err(TCPError::SocketError("port already in use".into()))
         } else {
@@ -186,9 +200,13 @@ impl PortService {
     /// returns port back to the pool
     fn free(&mut self, port: u16) {
         assert!(port >= Self::LOWEST_PORT);
-        assert!(self.taken.remove(&port));
 
-        self.freelist.push_back(port);
+        if let Some(last) = self.taken.last().copied()
+            && last >= port
+        {
+            assert!(self.taken.remove(&port));
+            self.freelist.push_back(port);
+        }
     }
 
     fn is_taken(&self, port: u16) -> bool {

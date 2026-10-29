@@ -50,7 +50,9 @@ impl DerefMut for SKCB {
 }
 
 pub struct SKCBInner {
+    /// local address
     pub l_addr: SocketAddrV4,
+    /// remote address for a connection, which is absent in the LISTEN state
     pub r_addr: Option<SocketAddrV4>,
 
     pub status: TCPState,
@@ -205,7 +207,15 @@ impl SKCB {
                 self.update_tcb(&packet);
                 seg_handler(self, packet).await?;
             }
-            SocketMessage::Receive(sender) => todo!(),
+            SocketMessage::Receive(sender) => {
+                // TODO: this doesnt work for out of order rcv buffer segments
+                let seq = self.tcb.rcv_nxt - self.rcv_buf.len();
+                if let Some(data) = self.rcv_buf.pop(seq) {
+                    sender.send(data);
+                } else {
+                    debug!("cant service receive request")
+                }
+            }
             SocketMessage::Send(data) => todo!(),
             SocketMessage::Status(sender) => {
                 sender.send(self.status).expect("the rcv cant be closed");
@@ -287,12 +297,12 @@ impl SKCB {
         let con = self.con();
         let packet = Packet::<TCP>::new(con.local_ip, con.remote_ip, tcp_hdr, opts, tcp_pay);
 
-        debug!(ip_hdr = %packet.hdr(), "sending packet out");
+        debug!(%tcp_hdr, "sending packet out"); // this prints incomplete information about the header but thats fine
         self.out_chan.send(packet.into()).await;
         Ok(())
     }
 
-    /// sends a naked ack based on current control block values
+    /// sends an ack based on current control block values
     ///
     /// can also serve as challenge ack
     pub(super) async fn send_ack(&self) -> Result<()> {

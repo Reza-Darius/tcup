@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::tcp::{error::TCPError, tcp_packet::TCP_SEG_MAX_SIZE};
 
@@ -124,6 +124,8 @@ impl RecvBuf {
             self.base = seq;
         }
 
+        tracing::debug!(seq, ?data, "inserted data");
+
         match self.data.entry(self.key(seq)) {
             std::collections::btree_map::Entry::Vacant(vacant_entry) => {
                 self.n_bytes += data.len() as u32;
@@ -162,6 +164,7 @@ impl RecvBuf {
         let idx = self.key(seq);
         let mut data = self.data.remove(&idx)?;
         let mut clean_up = Vec::new();
+        let mut removed_bytes = data.len();
 
         // we loop through the map such that we assemble one byte vector
         // segments and their associated data might overlap so we have to account for that
@@ -171,10 +174,12 @@ impl RecvBuf {
             let hi = idx + data.len() as u32;
             if e_seg >= lo && e_seg <= hi {
                 clean_up.push(e_seg);
+                removed_bytes += entry.1.len();
 
-                // this case should not be happening really but dont know for sure
                 if e_seg + entry.1.len() as u32 > hi {
-                    warn!("overlapping data found");
+                    if e_seg < hi {
+                        warn!("overlapping data found");
+                    }
 
                     let dif = hi - e_seg;
                     data.truncate(data.len() - dif as usize);
@@ -190,7 +195,12 @@ impl RecvBuf {
             debug_assert!(r.is_some());
         }
 
-        self.n_bytes -= data.len() as u32;
+        self.n_bytes -= removed_bytes as u32;
+        debug!(
+            n_freed_bytes = removed_bytes,
+            n_out_bytes = data.len(),
+            "retrieved from rcv buffer"
+        );
         Some(data)
     }
 
@@ -199,6 +209,10 @@ impl RecvBuf {
         self.data
             .first_key_value()
             .map(|entry| self.base.wrapping_add(*entry.0))
+    }
+
+    pub fn len(&self) -> u32 {
+        self.n_bytes
     }
 
     pub fn clear(&mut self) {

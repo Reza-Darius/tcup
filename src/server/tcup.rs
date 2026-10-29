@@ -1,5 +1,3 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
-
 use crate::{
     eth::EthPayload,
     ip::Ipv4Payload,
@@ -9,24 +7,66 @@ use crate::{
         transport::{TCPServiceV1, TransportService},
     },
     tap::device::TAPDeviceOptions,
+    tcp::socket::{TCPCall, TCPCon},
     utils::packet::{ETH, IP, Packet},
 };
 use anyhow::Result;
-use tracing::{debug, info, instrument};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::sync::oneshot;
+use tracing::{debug, info, instrument, warn};
 
-pub struct TcupServer {
-    virt_host: Ipv4Addr,
+pub async fn init(
+    if_name: impl Into<String>,
+    if_addr: (Ipv4Addr, u8),
+    virt_addr: SocketAddrV4,
+) -> Result<TCupHandle> {
+    let (tx, rx) = channel(1024);
+    let srv = TCupServer::new(if_name, if_addr, virt_addr, rx).await?;
+
+    tokio::spawn(async move { srv.run().await });
+
+    Ok(TCupHandle { sender: tx })
+}
+
+pub struct TCupHandle {
+    sender: Sender<TCPCall>,
+}
+
+impl TCupHandle {
+    pub async fn request_data(
+        &self,
+        virt_host: SocketAddrV4,
+        client: SocketAddrV4,
+    ) -> Result<oneshot::Receiver<Vec<u8>>> {
+        let con = TCPCon {
+            local_ip: *virt_host.ip(),
+            local_port: virt_host.port(),
+            remote_ip: *client.ip(),
+            remote_port: client.port(),
+        };
+        let (tx, rx) = oneshot::channel();
+        self.sender.send(TCPCall::Receive((con, tx))).await?;
+        Ok(rx)
+    }
+}
+
+struct TCupServer {
+    virt_host: SocketAddrV4,
 
     link_svc: TAPServiceHandle,
     arp_svc: ARPServiceHandle,
     trans_svc: TCPServiceV1,
+
+    user_chan: Receiver<TCPCall>,
 }
 
-impl TcupServer {
-    pub async fn new(
+impl TCupServer {
+    async fn new(
         if_name: impl Into<String>,
         if_addr: (Ipv4Addr, u8),
-        virt_addr: Ipv4Addr,
+        virt_addr: SocketAddrV4,
+        rx: Receiver<TCPCall>,
     ) -> Result<Self> {
         let tap = TAPServiceHandle::new(
             if_name,
@@ -36,39 +76,56 @@ impl TcupServer {
             512,
         )
         .await?;
-        let arp = ARPService::init(tap.mac, virt_addr, tap.sender());
+        let arp = ARPService::init(tap.mac, *virt_addr.ip(), tap.sender());
 
         let mut tcp = TCPServiceV1::new(arp.clone());
 
         // create a test listening socket
         tcp.service_request(crate::tcp::socket::TCPCall::Listen(SocketAddrV4::new(
-            virt_addr, 4000,
+            *virt_addr.ip(), virt_addr.port(),
         )))
         .await?;
 
-        Ok(TcupServer {
+        Ok(TCupServer {
             virt_host: virt_addr,
             link_svc: tap,
             arp_svc: arp,
             trans_svc: tcp,
+            user_chan: rx,
         })
     }
 
-    pub async fn run(mut self) -> Result<()> {
+    async fn run(mut self) -> Result<()> {
         info!(if_mac = %self.link_svc.mac, if_addr = %self.link_svc.addr.unwrap(), "running server");
 
-        while let Some(packet) = self.link_svc.recv().await {
-            if let Err(e) = self.handle_inc(packet).await {
-                debug!(%e, "error when handling packet");
+        loop {
+            tokio::select! {
+                link = self.link_svc.recv() => {
+                    if let Some(packet) = link {
+                        if let Err(e) = self.handle_inc_frame(packet).await {
+                            debug!(%e, "error when handling packet");
+                        }
+                    } else {
+                        warn!("link service channel closed!");
+                        break
+                    }
+                }
+                user_call = self.user_chan.recv() => {
+                    if let Some(call) = user_call {
+                        self.trans_svc.service_request(call).await?
+                    } else {
+                        warn!("user input channel closed!");
+                        break
+                    }
+                }
             }
         }
-
         info!("shutting down server");
         Ok(())
     }
 
     #[instrument(skip_all)]
-    async fn handle_inc(&mut self, packet: Packet<ETH>) -> Result<()> {
+    async fn handle_inc_frame(&mut self, packet: Packet<ETH>) -> Result<()> {
         let (hdr, payload) = packet.into_parts()?;
 
         debug!(eth_frame = %hdr);
@@ -92,7 +149,7 @@ impl TcupServer {
         debug!(ip_packet = %hdr);
 
         // is this packet for us?
-        if hdr.dip() != self.virt_host {
+        if hdr.dip() != *self.virt_host.ip() {
             return Ok(());
         }
 
@@ -100,22 +157,25 @@ impl TcupServer {
             Ipv4Payload::Icmp(packet) => {
                 if let Some(reply) = packet.service(hdr.sip(), hdr.dip()) {
                     self.arp_svc.send(reply.into()).await;
-                    // // do we have an address?
-                    // if let Some(mac_addr) = self.arp_svc.get_mac(hdr.sip()) {
-                    //     // if yes, build eth frame and send it
-                    //     let frame = Packet::<ETH>::new(mac_addr, self.link_svc.mac, reply.into());
-                    //     self.link_svc.send(frame.into()).await;
-                    //     debug!("ICMP reply sent");
-                    // } else {
-                    //     // if no, queue up the packet and send an arp request
-                    //     let arp_req = self.arp_svc.request_mac(hdr.sip());
-                    //     self.link_svc.send(arp_req.into()).await;
-                    // }
                 }
             }
             Ipv4Payload::Tcp(packet) => self.trans_svc.service_request(packet.into()).await?,
         };
 
         Ok(())
+    }
+
+    async fn recv_data(&mut self, addr: SocketAddrV4) -> Result<oneshot::Receiver<Vec<u8>>> {
+        let con = TCPCon {
+            local_ip: *self.virt_host.ip(),
+            local_port: 4000,
+            remote_ip: *addr.ip(),
+            remote_port: addr.port(),
+        };
+        let (tx, rx) = oneshot::channel();
+        self.trans_svc
+            .service_request(TCPCall::Receive((con, tx)))
+            .await?;
+        Ok(rx)
     }
 }
