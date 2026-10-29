@@ -6,13 +6,10 @@
     clippy::upper_case_acronyms
 )]
 
-pub mod error;
 pub mod eth;
 pub mod ip;
-// pub mod ipc;
 pub mod server;
 pub mod tap;
 pub mod tcp;
 pub mod utils;
 
-// pub use error::{Error, Result};
