@@ -6,7 +6,7 @@ mod opts;
 mod rto;
 mod seq;
 mod skcb;
-pub mod sock;
+pub mod socket;
 mod tcp_packet;
 mod timer;
 

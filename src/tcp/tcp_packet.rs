@@ -9,7 +9,7 @@ use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_HDR_SIZE, ETH_PAY_MAX_SIZE};
 use crate::ip::{IP_HDR_MINSIZE, IP_HDR_OFFSET, IPPROTO_TCP, IPv4Hdr};
 use crate::tcp::error::TCPError::{self, ParseError};
 use crate::tcp::opts::TCPOpts;
-use crate::tcp::sock::TCPCon;
+use crate::tcp::socket::TCPCon;
 use crate::utils::calc_checksum_be;
 use crate::utils::packet::{IP, Packet, PacketBuf, TCP};
 
@@ -417,17 +417,7 @@ fn verify_tcp_checksum(packet: &Packet<IP>) -> bool {
 
 impl std::fmt::Display for TCPHdr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sport = self.sport;
-        let dport = self.dport;
-        let seq = self.seq;
-        let ack = self.ack;
-        let len = self.len();
-        let win_size = self.win_size;
-        let check = self.check;
-        let urg_ptr = self.urg_ptr;
-        let flags = self.flags;
-
-        let active_flags: Vec<&str> = [
+        let flags = [
             (TCPFlags::CWR, "CWR"),
             (TCPFlags::ECE, "ECE"),
             (TCPFlags::URG, "URG"),
@@ -438,29 +428,23 @@ impl std::fmt::Display for TCPHdr {
             (TCPFlags::FIN, "FIN"),
         ]
         .iter()
-        .filter_map(|(flag, name)| {
-            if flags.contains(*flag) {
-                Some(*name)
-            } else {
-                None
-            }
-        })
-        .collect();
+        .filter_map(|(flag, name)| self.flags.contains(*flag).then_some(*name))
+        .collect::<Vec<_>>()
+        .join(", ");
 
-        writeln!(f, "┌─────────────────┬───────────────────┐")?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "Field", "Value")?;
-        writeln!(f, "├─────────────────┼───────────────────┤")?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "src port", sport)?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "dst port", dport)?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "seq", seq)?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "ack", ack)?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "header len", len)?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "window", win_size)?;
-        writeln!(f, "│ {:<15} │ {:#06x}            │", "checksum", check)?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "urgent ptr", urg_ptr)?;
-        writeln!(f, "├─────────────────┼───────────────────┤")?;
-        writeln!(f, "│ {:<15} │ {:<17} │", "flags", active_flags.join(", "))?;
-        write!(f, "└─────────────────┴───────────────────┘")
+        write!(
+            f,
+            "sport: {}, dport: {}, seq: {}, ack: {}, len: {}, win_size: {}, check: {:#06x}, urg_ptr: {}, flags: {}",
+            self.sport,
+            self.dport,
+            self.seq,
+            self.ack,
+            self.len(),
+            self.win_size,
+            self.check,
+            self.urg_ptr,
+            flags,
+        )
     }
 }
 

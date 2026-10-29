@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 use tracing::{debug, error, instrument, trace};
 
-use super::sock::TCPCon;
+use super::socket::TCPCon;
 use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::server::services::arp_svc::ARPServiceHandle;
 use crate::tcp::buffer::{RecvBuf, SendBuf};
@@ -15,7 +15,7 @@ use crate::tcp::{
     opts::TCPOpts,
     rto::RTO,
     seq::*,
-    sock::*,
+    socket::*,
     tcp_packet::{TCPFlags, TCPHdr},
     timer::TIME_WAIT,
 };
@@ -432,29 +432,16 @@ impl std::fmt::Display for TCB {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "\n{:<12} {:>10}\n{:<12} {:>10}\n{:<12} {:>10}\
-             \n{:<12} {:>10}\n{:<12} {:>10}\
-             \n{:<12} {:>10}\n{:<12} {:>10}\
-             \n{:<12} {:>10}\n{:<12} {:>10}\n{:<12} {:>10}",
-            "snd_una",
+            "snd_una: {}, snd_nxt: {}, snd_wnd: {}, rcv_nxt: {}, rcv_wnd: {}, iss: {}, irs: {}, seg_seq: {}, seg_ack: {}, seg_len: {}",
             self.snd_una,
-            "snd_nxt",
             self.snd_nxt,
-            "snd_wnd",
             self.snd_wnd,
-            "rcv_nxt",
             self.rcv_nxt,
-            "rcv_wnd",
             self.rcv_wnd,
-            "iss",
             self.iss,
-            "irs",
             self.irs,
-            "seg_seq",
             self.seg_seq,
-            "seg_ack",
             self.seg_ack,
-            "seg_len",
             self.seg_len,
         )
     }

@@ -73,7 +73,7 @@ pub struct ARPService {
 }
 
 impl ARPService {
-    pub fn new(
+    pub fn init(
         if_mac: Mac,
         if_addr: Ipv4Addr,
         sender: Sender<TAPActorMessage>,

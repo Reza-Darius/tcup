@@ -10,7 +10,7 @@ use crate::{
     server::services::arp_svc::ARPServiceHandle,
     tcp::{
         TCPError, TCPState,
-        sock::{Socket, TCPCall, TCPCon, no_socket_found},
+        socket::{Socket, TCPCall, TCPCon, no_socket_found},
     },
     utils::packet::{Packet, TCP},
 };
@@ -74,6 +74,7 @@ impl TCPServiceV1 {
         Ok(())
     }
 
+    // OPTIMIZE: we are requesting the status for every submitted packet, no bueno!
     #[instrument(skip_all, fields(con = ?segment.con()))]
     async fn service_segment(&mut self, segment: Packet<TCP>) -> Result<(), TCPError> {
         let seg_con = segment.con();

@@ -5,7 +5,7 @@ use crate::{
     ip::Ipv4Payload,
     server::services::{
         arp_svc::{ARPService, ARPServiceHandle},
-        tap_svc::TAPActorHandle,
+        tap_svc::TAPServiceHandle,
         transport::{TCPServiceV1, TransportService},
     },
     tap::device::TAPDeviceOptions,
@@ -16,7 +16,8 @@ use tracing::{debug, info, instrument};
 
 pub struct TcupServer {
     virt_host: Ipv4Addr,
-    link_svc: TAPActorHandle,
+
+    link_svc: TAPServiceHandle,
     arp_svc: ARPServiceHandle,
     trans_svc: TCPServiceV1,
 }
@@ -27,7 +28,7 @@ impl TcupServer {
         if_addr: (Ipv4Addr, u8),
         virt_addr: Ipv4Addr,
     ) -> Result<Self> {
-        let tap = TAPActorHandle::new(
+        let tap = TAPServiceHandle::new(
             if_name,
             TAPDeviceOptions {
                 addr: Some((IpAddr::V4(if_addr.0), if_addr.1)),
@@ -35,12 +36,12 @@ impl TcupServer {
             512,
         )
         .await?;
-        let arp = ARPService::new(tap.mac, virt_addr, tap.sender());
+        let arp = ARPService::init(tap.mac, virt_addr, tap.sender());
 
         let mut tcp = TCPServiceV1::new(arp.clone());
 
         // create a test listening socket
-        tcp.service_request(crate::tcp::sock::TCPCall::Listen(SocketAddrV4::new(
+        tcp.service_request(crate::tcp::socket::TCPCall::Listen(SocketAddrV4::new(
             virt_addr, 4000,
         )))
         .await?;

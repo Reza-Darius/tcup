@@ -8,7 +8,7 @@ use siphasher::sip::SipHasher13;
 
 use crate::tcp::timer::TICK;
 
-use super::sock::TCPCon;
+use super::socket::TCPCon;
 
 #[derive(Debug, Clone, Copy, Display)]
 pub struct Seq(u32);

@@ -30,14 +30,14 @@ impl From<Vec<Packet<ETH>>> for TAPActorMessage {
     }
 }
 
-pub struct TAPActorHandle {
+pub struct TAPServiceHandle {
     pub addr: Option<IpAddr>,
     pub mac: Mac,
     sender: Sender<TAPActorMessage>,
     receiver: Receiver<Packet<ETH>>,
 }
 
-impl TAPActorHandle {
+impl TAPServiceHandle {
     /// initializes a new TAP device, panics if called more than once
     pub async fn new(
         name: impl Into<String>,
@@ -58,7 +58,7 @@ impl TAPActorHandle {
 
         tokio::spawn(async move { actor.run().await });
 
-        Ok(TAPActorHandle {
+        Ok(TAPServiceHandle {
             addr,
             mac,
             sender: msg_tx,
@@ -75,7 +75,7 @@ impl TAPActorHandle {
     }
 }
 
-impl TAPActorHandle {
+impl TAPServiceHandle {
     pub async fn send(&self, msg: TAPActorMessage) {
         self.sender.send(msg).await.unwrap();
     }
