@@ -573,6 +573,8 @@ fn accept_data(skcb: &mut SKCB, seg_hdr: &TCPHdr, seg_payload: Option<TCPPayload
         skcb.rcv_buf.insert(seg_data.as_bytes(), rcv_nxt);
         skcb.tcb.rcv_nxt = rcv_nxt.wrapping_add(skcb.tcb.seg_len);
         skcb.tcb.rcv_wnd = skcb.rcv_buf.available_cap();
+
+        skcb.try_empty_rcv_buffer();
     };
 
     if seg_hdr.is_fin() {

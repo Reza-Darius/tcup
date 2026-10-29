@@ -3,6 +3,7 @@ use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::oneshot;
 use tracing::{debug, error, instrument, trace};
 
 use super::socket::TCPCon;
@@ -68,6 +69,8 @@ pub struct SKCBInner {
     pub snd_buf: SendBuf,
     /// buffer for incoming data
     pub rcv_buf: RecvBuf,
+
+    pub pending_req: Option<oneshot::Sender<Vec<u8>>>,
 }
 
 #[derive(Debug)]
@@ -158,6 +161,8 @@ impl SKCB {
 
                 l_addr: addr,
                 r_addr: None,
+
+                pending_req: None,
             }),
         };
 
@@ -207,12 +212,21 @@ impl SKCB {
                 self.update_tcb(&packet);
                 seg_handler(self, packet).await?;
             }
+            // TODO: how do we deal with multiple receive calls?
             SocketMessage::Receive(sender) => {
-                // TODO: this doesnt work for out of order rcv buffer segments
-                let seq = self.tcb.rcv_nxt - self.rcv_buf.len();
-                if let Some(data) = self.rcv_buf.pop(seq) {
+                if !self.is_synchronized() {
+                    self.pending_req = Some(sender);
+                    return Ok(());
+                }
+
+                if let Some(data) = self
+                    .rcv_buf
+                    .seq_first()
+                    .and_then(|seq| self.rcv_buf.pop(seq))
+                {
                     sender.send(data);
                 } else {
+                    self.pending_req = Some(sender);
                     debug!("cant service receive request")
                 }
             }
@@ -435,6 +449,22 @@ impl SKCB {
 
         trace!(from = ?self.status, to = ?to, "changing state");
         self.status = to;
+    }
+
+    /// tries to pull bytes out of the rcv buffer if we have a pending request
+    pub(super) fn try_empty_rcv_buffer(&mut self) {
+        if !self.is_synchronized() {
+            return;
+        }
+
+        if let Some(sender) = self.pending_req.take()
+            && let Some(data) = self
+                .rcv_buf
+                .seq_first()
+                .and_then(|seq| self.rcv_buf.pop(seq))
+        {
+            let _ = sender.send(data);
+        }
     }
 }
 

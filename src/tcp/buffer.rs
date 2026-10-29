@@ -147,8 +147,6 @@ impl RecvBuf {
     }
 
     /// removes consecutive data from the buffer starting at the provided seq number
-    ///
-    /// this should be calculated as rcv_next - buf.len()
     pub fn pop(&mut self, seq: u32) -> Option<Vec<u8>> {
         if self.data.is_empty() {
             return None;

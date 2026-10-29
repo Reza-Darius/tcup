@@ -82,7 +82,8 @@ impl TCupServer {
 
         // create a test listening socket
         tcp.service_request(crate::tcp::socket::TCPCall::Listen(SocketAddrV4::new(
-            *virt_addr.ip(), virt_addr.port(),
+            *virt_addr.ip(),
+            virt_addr.port(),
         )))
         .await?;
 

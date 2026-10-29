@@ -1,4 +1,4 @@
 pub mod services;
 pub mod tcup;
 
-pub use tcup::{init, TCupHandle};
+pub use tcup::{TCupHandle, init};
