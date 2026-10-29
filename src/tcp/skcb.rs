@@ -284,7 +284,6 @@ impl SKCB {
         opts: TCPOpts,
         tcp_pay: &[u8],
     ) -> Result<()> {
-
         let con = self.con();
         let packet = Packet::<TCP>::new(con.local_ip, con.remote_ip, tcp_hdr, opts, tcp_pay);
 

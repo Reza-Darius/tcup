@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::sync::{mpsc::Sender, oneshot};
-use tracing::{debug, error};
+use tracing::error;
 
 use crate::{
     server::services::arp_svc::ARPServiceHandle,

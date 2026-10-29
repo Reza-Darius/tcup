@@ -1,7 +1,7 @@
 use std::assert_matches;
 use std::net::SocketAddrV4;
 
-use tracing::{instrument, trace};
+use tracing::trace;
 
 use super::error::TCPError;
 use crate::eth::ETH_FRAME_MAX_SIZE;
