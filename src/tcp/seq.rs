@@ -3,13 +3,15 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use derive_more::{Add, Display, Div, Mul};
+use derive_more::Display;
 use siphasher::sip::SipHasher13;
 
-use crate::{tcp::timer::TICK, types::TCPCon};
+use crate::tcp::timer::TICK;
 
-#[derive(Debug, Clone, Copy, Display, Add, Mul, Div)]
-struct Seq(u32);
+use super::sock::TCPCon;
+
+#[derive(Debug, Clone, Copy, Display)]
+pub struct Seq(u32);
 
 impl Seq {
     pub fn new(con: &TCPCon) -> Self {
@@ -21,6 +23,10 @@ impl Seq {
         con.hash(&mut hasher);
 
         Seq(hasher.finish() as u32)
+    }
+
+    pub fn get(&self) -> u32 {
+        self.0
     }
 
     // pub fn cmp(&self, other: Seq) -> Ordering {
@@ -53,6 +59,20 @@ impl From<u32> for Seq {
     }
 }
 
+impl std::ops::Add<u32> for Seq {
+    type Output = Seq;
+    fn add(self, rhs: u32) -> Seq {
+        Seq(self.0.wrapping_add(rhs))
+    }
+}
+
+impl std::ops::Sub for Seq {
+    type Output = i32; // signed distance
+    fn sub(self, rhs: Seq) -> i32 {
+        self.0.wrapping_sub(rhs.0) as i32
+    }
+}
+
 impl Eq for Seq {}
 
 impl PartialEq for Seq {
@@ -61,30 +81,41 @@ impl PartialEq for Seq {
     }
 }
 
-impl Ord for Seq {
-    fn cmp(&self, other: &Self) -> Ordering {
-        (self.0.wrapping_sub(other.0) as i32).cmp(&0)
-    }
-}
-
 impl PartialOrd for Seq {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        match self.0.wrapping_sub(other.0) as i32 {
+            0 => Some(Ordering::Equal),
+            d if d < 0 => Some(Ordering::Less),
+            d if d > 0 => Some(Ordering::Greater),
+            _ => None,
+        }
     }
 }
 
+pub fn before(a: u32, b: u32) -> bool {
+    seq_lt(a, b)
+}
+
+pub fn after(a: u32, b: u32) -> bool {
+    seq_gt(a, b)
+}
+
+/// a < b
 pub fn seq_lt(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) < 0
 }
 
+/// a <= b
 pub fn seq_lte(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) <= 0
 }
 
+/// a > b
 pub fn seq_gt(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) > 0
 }
 
+/// a >= b
 pub fn seq_gte(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) >= 0
 }

@@ -4,15 +4,17 @@ use std::time::Duration;
 use std::{collections::HashMap, net::Ipv4Addr};
 
 use crate::Error;
-use crate::arp::arp_broadcast;
 use crate::error::Result;
-use crate::eth::{ETH_FRAME_MAX_SIZE, EthFrame, handle_frame};
+use crate::eth::arp_broadcast;
+use crate::eth::{ETH_FRAME_MAX_SIZE, EthPacket, handle_frame};
 use crate::tap::TAPDevice;
 use crate::tcp::sock::Socket;
 use crate::tcp::timer::start_clock;
-use crate::types::{Mac, TCPCon};
-use crate::utils::{cidr_to_mask, get_default_gateway, setup_cap};
+use crate::types::TCPCon;
+use crate::utils::Mac;
+use crate::utils::cidr_to_mask;
 use parking_lot::{Mutex, RwLock};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, trace, warn};
 
@@ -39,28 +41,28 @@ struct TCupInner {
 
 impl TCup {
     pub fn init(name: &str, addr: &str) -> Result<Self> {
-        setup_cap()?;
+        // let tap = TAPDevice::new(name)?;
+        // tap.set_if_link()?;
+        // tap.set_if_addr(addr)?;
+        //
+        // let mut parts = addr.split('/');
+        //
+        // let inner = TCupInner {
+        //     ip: Ipv4Addr::from_str(parts.next().unwrap())?,
+        //     mac: tap.mac()?,
+        //     subnet: str::parse::<u8>(parts.next().unwrap()).unwrap(),
+        //     gateway: get_default_gateway().unwrap(),
+        //     tap,
+        //     con_table: RwLock::new(HashMap::new()),
+        //     arp_table: Mutex::new(HashMap::new()),
+        //     arp_chiller: Mutex::new(HashMap::new()),
+        // };
+        //
+        // Ok(TCup {
+        //     inner: Arc::new(inner),
+        // })
 
-        let tap = TAPDevice::new(name)?;
-        tap.set_if_link()?;
-        tap.set_if_addr(addr)?;
-
-        let mut parts = addr.split('/');
-
-        let inner = TCupInner {
-            ip: Ipv4Addr::from_str(parts.next().unwrap())?,
-            mac: tap.get_mac()?,
-            subnet: str::parse::<u8>(parts.next().unwrap()).unwrap(),
-            gateway: get_default_gateway().unwrap(),
-            tap,
-            con_table: RwLock::new(HashMap::new()),
-            arp_table: Mutex::new(HashMap::new()),
-            arp_chiller: Mutex::new(HashMap::new()),
-        };
-
-        Ok(TCup {
-            inner: Arc::new(inner),
-        })
+        todo!()
     }
 
     /// get the ipv4 address of the TAP interface
@@ -105,22 +107,22 @@ impl TCup {
             let tcup = self.clone();
 
             tokio::select! {
-                res = tcup.inner.tap.read(&mut *buf) => {
-                    match res {
-                        Err(e) => error!(%e, "error when reading from tap"),
-                        Ok(n) => {
-                            // TODO find out the true ethernet frame min size
-                            if n < 15 {
-                                error!("less than one frame worth of bytes received");
-                                continue;
-                            }
-
-                            trace!("{n} bytes received");
-
-                            handle_tap(tcup, buf.as_mut()).await;
-                        }
-                    }
-                }
+                // res = tcup.inner.tap.read(&mut *buf) => {
+                //     match res {
+                //         Err(e) => error!(%e, "error when reading from tap"),
+                //         Ok(n) => {
+                //             // TODO find out the true ethernet frame min size
+                //             if n < 15 {
+                //                 error!("less than one frame worth of bytes received");
+                //                 continue;
+                //             }
+                //
+                //             trace!("{n} bytes received");
+                //
+                //             handle_tap(tcup, buf.as_mut()).await;
+                //         }
+                //     }
+                // }
                 _ = shutdown() => {}
                 // read_ctrl_bus() => {}
                 // read_data_bus() => {}
@@ -129,8 +131,9 @@ impl TCup {
     }
 
     /// writes to the TAP device
-    pub async fn write_tap(&self, frame: EthFrame) -> Result<usize> {
-        self.inner.tap.write(frame).await
+    pub async fn write_tap(&self, frame: EthPacket) -> Result<usize> {
+        // self.inner.tap.write(frame.as_bytes()).await.map_err(Into::into)
+        todo!()
     }
 
     pub fn arp_table_insert(&self, ip: Ipv4Addr, mac: Mac) -> Option<Mac> {
@@ -223,7 +226,7 @@ async fn handle_tap(tcup: TCup, mut buf: impl AsMut<[u8]>) {
     let buf = buf.as_mut();
     let n = buf.len();
 
-    let frame = match EthFrame::from_be_bytes(&buf[..n]) {
+    let frame = match EthPacket::from_be_bytes(&buf[..n]) {
         Ok(f) => f,
         Err(e) => {
             error!(%e, "failed to create frame");

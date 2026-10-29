@@ -16,7 +16,6 @@ Tcup is an asynchronous virtual networking interface capable of handling TCP/IP 
 
 - RTO
 - Retransmission Queue
-- UDS based IPC protocol
 - Berkley Socket API
 
 ## Getting Started (coming soon)
