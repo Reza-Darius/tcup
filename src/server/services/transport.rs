@@ -63,9 +63,7 @@ impl TCPServiceV1 {
     }
 
     async fn new_listen(&mut self, addr: SocketAddrV4) -> Result<(), TCPError> {
-        if self.port_svc.is_taken(addr.port()) {
-            return Err(TCPError::SocketError("port already in use".into()));
-        }
+        self.port_svc.insert(addr.port())?;
 
         debug!(%addr, "new listening socket");
 
@@ -79,7 +77,7 @@ impl TCPServiceV1 {
     #[instrument(skip_all, fields(con = ?segment.con()))]
     async fn service_segment(&mut self, segment: Packet<TCP>) -> Result<(), TCPError> {
         let seg_con = segment.con();
-        let listen_addr = SocketAddrV4::new(seg_con.remote_ip, seg_con.remote_port);
+        let listen_addr = SocketAddrV4::new(seg_con.local_ip, seg_con.local_port);
 
         // check for established connection
         if let Some(con_sock) = self
@@ -95,7 +93,7 @@ impl TCPServiceV1 {
                 }
                 TCPState::Closed => {
                     self.con_table.remove(&seg_con);
-                    self.port_svc.free(seg_con.remote_port);
+                    self.port_svc.free(seg_con.local_port);
                 }
                 _ => {}
             }
@@ -108,7 +106,7 @@ impl TCPServiceV1 {
             .get(&listen_addr)
             .and_then(|&key| self.socket_table.get(key))
         else {
-            error!("no socket found");
+            error!(%listen_addr, "no socket found");
 
             if let Some(resp) = no_socket_found(segment).await {
                 self.out_svc.send(resp.into()).await;
@@ -156,6 +154,14 @@ impl PortService {
         PortService {
             freelist: VecDeque::new(),
             taken: BTreeSet::new(),
+        }
+    }
+
+    fn insert(&mut self, port: u16) -> Result<(), TCPError> {
+        if !self.taken.insert(port) {
+            Err(TCPError::SocketError("port already in use".into()))
+        } else {
+            Ok(())
         }
     }
 

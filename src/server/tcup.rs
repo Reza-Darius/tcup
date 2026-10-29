@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 
 use crate::{
     eth::EthPayload,
@@ -6,7 +6,7 @@ use crate::{
     server::services::{
         arp_svc::{ARPService, ARPServiceHandle},
         tap_svc::TAPActorHandle,
-        transport::TCPServiceV1,
+        transport::{TCPServiceV1, TransportService},
     },
     tap::device::TAPDeviceOptions,
     utils::packet::{ETH, IP, Packet},
@@ -37,11 +37,19 @@ impl TcupServer {
         .await?;
         let arp = ARPService::new(tap.mac, virt_addr, tap.sender());
 
+        let mut tcp = TCPServiceV1::new(arp.clone());
+
+        // create a test listening socket
+        tcp.service_request(crate::tcp::sock::TCPCall::Listen(SocketAddrV4::new(
+            virt_addr, 4000,
+        )))
+        .await?;
+
         Ok(TcupServer {
             virt_host: virt_addr,
             link_svc: tap,
-            arp_svc: arp.clone(),
-            trans_svc: TCPServiceV1::new(arp),
+            arp_svc: arp,
+            trans_svc: tcp,
         })
     }
 
@@ -104,7 +112,7 @@ impl TcupServer {
                     // }
                 }
             }
-            Ipv4Payload::Tcp(packet) => unimplemented!(),
+            Ipv4Payload::Tcp(packet) => self.trans_svc.service_request(packet.into()).await?,
         };
 
         Ok(())

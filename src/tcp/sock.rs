@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::sync::{mpsc::Sender, oneshot};
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::{
     server::services::arp_svc::ARPServiceHandle,
@@ -69,7 +69,6 @@ impl Socket {
         let handle = tokio::spawn(async move {
             skcb.status = TCPState::Listen;
             skcb.open = Open::Passive;
-
             skcb.run().await.unwrap();
         });
 
@@ -83,14 +82,14 @@ impl Socket {
     pub fn connect(
         tx: ARPServiceHandle,
         s_addr: SocketAddrV4,
-        r_add: SocketAddrV4,
+        r_addr: SocketAddrV4,
         chan_size: usize,
     ) -> Self {
         let (s_tx, s_rx) = tokio::sync::mpsc::channel(chan_size);
         let mut skcb = SKCB::new(s_rx, tx, s_addr);
 
         let handle = tokio::spawn(async move {
-            active_open(&mut skcb, r_add).await.unwrap();
+            active_open(&mut skcb, r_addr).await.unwrap();
             skcb.run().await.unwrap();
         });
 
@@ -154,6 +153,12 @@ pub enum TCPCall {
     Send((TCPCon, Vec<u8>)),
     Receive((TCPCon, oneshot::Sender<Vec<u8>>)),
     Segment(Packet<TCP>),
+}
+
+impl From<Packet<TCP>> for TCPCall {
+    fn from(value: Packet<TCP>) -> Self {
+        TCPCall::Segment(value)
+    }
 }
 
 /// messages for a TCP connection worker

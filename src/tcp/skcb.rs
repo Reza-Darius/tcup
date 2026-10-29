@@ -3,7 +3,7 @@ use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::Receiver;
-use tracing::{debug, error, trace};
+use tracing::{debug, error, instrument, trace};
 
 use super::sock::TCPCon;
 use crate::eth::ETH_FRAME_MAX_SIZE;
@@ -164,6 +164,7 @@ impl SKCB {
     }
 
     /// event loop listening for user calls, data segments and timers
+    #[instrument(name = "TCP", skip_all, fields(state = ?self.status))]
     pub async fn run(mut self) -> Result<()> {
         // we need to linger after closing the socket before reopening it as to not confuse
         // packets for the old connection
@@ -283,10 +284,11 @@ impl SKCB {
         opts: TCPOpts,
         tcp_pay: &[u8],
     ) -> Result<()> {
-        debug!(%tcp_hdr, "sending packet out");
 
         let con = self.con();
         let packet = Packet::<TCP>::new(con.local_ip, con.remote_ip, tcp_hdr, opts, tcp_pay);
+
+        debug!(ip_hdr = %packet.hdr(), "sending packet out");
         self.out_chan.send(packet.into()).await;
         Ok(())
     }

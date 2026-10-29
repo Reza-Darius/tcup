@@ -28,7 +28,6 @@ pub const SYN_ACK_RETRIES: u64 = 5;
 type Result<T> = std::result::Result<T, TCPError>;
 
 /// dispatch the correct handler for a segment event
-#[instrument(skip_all, fields(state = ?skcb.status))]
 pub async fn seg_handler(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     let hdr = seg.hdr();
 
@@ -183,7 +182,7 @@ async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     // passive open:
 
     let con = seg.con();
-    skcb.r_addr = Some(SocketAddrV4::new(con.local_ip, con.local_port));
+    skcb.r_addr = Some(SocketAddrV4::new(con.remote_ip, con.remote_port));
 
     // configure initial sequence numbers
     skcb.tcb.iss = new_isn(&skcb.con());
@@ -258,6 +257,8 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
         skcb.change_state(TCPState::Established);
 
+        // our syn got acked, we move the window
+        skcb.tcb.snd_una = skcb.tcb.seg_ack;
         return established(skcb, seg).await;
     } else {
         let mut tcp_hdr = TCPHdr {

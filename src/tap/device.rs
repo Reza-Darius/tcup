@@ -349,9 +349,6 @@ impl Stream for TAPStream {
         let mut read_buf = ReadBuf::uninit(this.buf);
 
         ready!(this.tap.poll_read(cx, &mut read_buf))?;
-        // if let Err(e) = ready!(this.tap.poll_read(cx, &mut read_buf)) {
-        //     return Poll::Ready(Some(Err(e)));
-        // };
 
         trace!(nbytes = read_buf.filled().len(), "read bytes in stream");
 
@@ -393,7 +390,7 @@ impl AsyncWrite for TAPDevice {
     ) -> Poll<io::Result<usize>> {
         loop {
             let mut guard = ready!(self.fd.poll_write_ready(cx))?;
-
+            trace!(n_bytes = buf.len(), "writing bytes to TAP");
             match guard.try_io(|inner| rustix::io::write(inner.get_ref(), buf).map_err(Into::into))
             {
                 Ok(result) => return Poll::Ready(result),

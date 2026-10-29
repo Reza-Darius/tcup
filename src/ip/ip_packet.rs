@@ -111,7 +111,11 @@ impl Packet<IP> {
                 let packet = Packet::<ICMP>::parse(self)?;
                 Ok((hdr, packet.into()))
             }
-            Ipv4Prot::Tcp => todo!(),
+            Ipv4Prot::Tcp => {
+                let packet = Packet::<TCP>::parse(self)
+                    .map_err(|e| IpErr::ParseError(format!("error when parsing tcp {e}")))?;
+                Ok((hdr, packet.into()))
+            }
         }
     }
 

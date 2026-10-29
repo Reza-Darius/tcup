@@ -2,6 +2,7 @@ use std::default;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use bytes::BufMut;
+use tracing::warn;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16, U32};
 
 use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_HDR_SIZE, ETH_PAY_MAX_SIZE};
@@ -185,11 +186,13 @@ impl TCPPayload {
 
 impl Packet<TCP> {
     pub fn parse(packet: Packet<IP>) -> Result<Self, TCPError> {
-        if packet.len() <= ETH_HDR_SIZE + IP_HDR_MINSIZE as usize + TCP_HDR_MINSIZE {
+        if packet.len() < ETH_HDR_SIZE + IP_HDR_MINSIZE as usize + TCP_HDR_MINSIZE {
+            warn!(len = packet.len(), "packet len is too small");
             return Err(ParseError);
         }
 
         if !verify_tcp_checksum(&packet) {
+            warn!("invalid checksum");
             return Err(ParseError);
         }
 
@@ -204,12 +207,7 @@ impl Packet<TCP> {
         opts: TCPOpts,
         payload: &[u8],
     ) -> Packet<IP> {
-        debug_assert!(
-            hdr.len() == TCP_HDR_MINSIZE + opts.len(),
-            "tcp hdr len and opt len dont add up"
-        );
-        debug_assert!(hdr.len() <= TCP_HDR_MAXSIZE, "max tcp header len exceeded");
-
+        hdr.set_len(TCP_HDR_MINSIZE + opts.len());
         let payload_offset = ETH_HDR_SIZE + IP_HDR_MINSIZE as usize + hdr.len();
 
         debug_assert!(payload_offset + payload.len() <= ETH_FRAME_MAX_SIZE);
@@ -222,7 +220,6 @@ impl Packet<TCP> {
 
         let mut packet = Packet::<TCP>::from_vec(data);
 
-        hdr.set_len(TCP_HDR_MINSIZE + opts.len());
         packet.set_hdr(hdr);
         packet.set_options(opts);
         packet.set_checksum(PseudoHdr::new(
