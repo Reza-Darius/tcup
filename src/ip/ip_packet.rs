@@ -2,10 +2,11 @@ use std::net::Ipv4Addr;
 
 use bytes::BufMut;
 use num_enum::TryFromPrimitive;
+use tracing::trace;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
 use crate::eth::Mac;
-use crate::ip::IpErr::{BuildError, ParseError};
+use crate::ip::IpErr::{BuildError, ParseError, UnsupportedProtocol};
 use crate::utils::packet::*;
 use crate::{
     eth::ETH_HDR_SIZE,
@@ -50,6 +51,10 @@ impl Packet<IP> {
         let eth_pay = &packet.as_bytes()[IP_HDR_OFFSET..];
         let hdr_size = get_hdr_len(eth_pay[0]);
 
+        if get_hdr_ver(eth_pay[0]) != libc::IPVERSION {
+            return Err(UnsupportedProtocol);
+        }
+
         let check = calc_checksum_be(&eth_pay[..hdr_size as usize]);
         if check != 0 {
             return Err(ParseError(format!("invalid IP checksum: {check:x}")));
@@ -57,10 +62,6 @@ impl Packet<IP> {
 
         if eth_pay.len() < IP_HDR_MINSIZE as usize {
             return Err(ParseError("eth_pay is too small for IP header".into()));
-        }
-
-        if get_hdr_ver(eth_pay[0]) != libc::IPVERSION {
-            return Err(ParseError("unsupported IP version".into()));
         }
 
         if hdr_size as usize > eth_pay.len() {
@@ -83,10 +84,8 @@ impl Packet<IP> {
             .0;
 
         Ipv4Prot::try_from(hdr.prot).map_err(|e| {
-            ParseError(format!(
-                "unsupported IP payload protocol, ver: {}",
-                hdr.prot
-            ))
+            trace!(hdr.prot, "unsupported IP payload protocol",);
+            UnsupportedProtocol
         })?;
 
         if !hdr.is_fragmented() {

@@ -219,11 +219,7 @@ impl SKCB {
                     return Ok(());
                 }
 
-                if let Some(data) = self
-                    .rcv_buf
-                    .seq_first()
-                    .and_then(|seq| self.rcv_buf.pop(seq))
-                {
+                if let Some(data) = self.rcv_buf.pop_first() {
                     sender.send(data);
                 } else {
                     self.pending_req = Some(sender);
@@ -458,10 +454,7 @@ impl SKCB {
         }
 
         if let Some(sender) = self.pending_req.take()
-            && let Some(data) = self
-                .rcv_buf
-                .seq_first()
-                .and_then(|seq| self.rcv_buf.pop(seq))
+            && let Some(data) = self.rcv_buf.pop_first()
         {
             let _ = sender.send(data);
         }

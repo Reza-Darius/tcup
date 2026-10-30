@@ -54,6 +54,10 @@ pub async fn no_socket_found(seg: Packet<TCP>) -> Option<Packet<IP>> {
     ))
 }
 
+pub struct SocketUserHandler {
+    sender: Sender<SocketMessage>,
+}
+
 /// a handle to a socket
 pub struct Socket {
     sender: Sender<SocketMessage>,

@@ -2,7 +2,7 @@ use num_enum::TryFromPrimitive;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
 use super::mac::*;
-use crate::eth::EthErr::{InvalidProtError, ParseError};
+use crate::eth::EthErr::{UnsupportedProtocol, ParseError};
 use crate::eth::error::EthErr;
 use crate::utils::packet::*;
 
@@ -61,7 +61,7 @@ impl Packet<ETH> {
             .prot_type
             .get()
             .try_into()
-            .map_err(|_| InvalidProtError)?;
+            .map_err(|_| UnsupportedProtocol)?;
 
         Ok(Packet::from_vec(data))
     }
@@ -272,7 +272,7 @@ mod tests {
         data[MAC_ADDR_LEN * 2..MAC_ADDR_LEN * 2 + 2].copy_from_slice(&0xFFFFu16.to_be_bytes());
 
         let result = Packet::<ETH>::parse(data);
-        assert!(matches!(result, Err(EthErr::InvalidProtError)));
+        assert!(matches!(result, Err(EthErr::UnsupportedProtocol)));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::{
-    eth::EthPayload,
-    ip::Ipv4Payload,
+    eth::{EthErr, EthPayload},
+    ip::{IpErr, Ipv4Payload},
     server::services::{
         arp_svc::{ARPService, ARPServiceHandle},
         tap_svc::TAPServiceHandle,
@@ -14,7 +14,7 @@ use anyhow::Result;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::sync::oneshot;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 pub async fn init(
     if_name: impl Into<String>,
@@ -104,7 +104,7 @@ impl TCupServer {
                 link = self.link_svc.recv() => {
                     if let Some(packet) = link {
                         if let Err(e) = self.handle_inc_frame(packet).await {
-                            debug!(%e, "error when handling packet");
+                            check_err(e);
                         }
                     } else {
                         warn!("link service channel closed!");
@@ -178,5 +178,18 @@ impl TCupServer {
             .service_request(TCPCall::Receive((con, tx)))
             .await?;
         Ok(rx)
+    }
+}
+
+fn check_err(error: anyhow::Error) {
+    if let Some(e) = error.downcast_ref::<EthErr>()
+        && !matches!(e, EthErr::UnsupportedProtocol)
+    {
+        error!(%e, "error when handling packet");
+    }
+    if let Some(e) = error.downcast_ref::<IpErr>()
+        && !matches!(e, IpErr::UnsupportedProtocol)
+    {
+        error!(%e, "error when handling packet");
     }
 }

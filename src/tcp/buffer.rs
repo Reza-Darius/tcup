@@ -146,6 +146,11 @@ impl RecvBuf {
         trace!(cur_size = self.n_bytes, "inserting into rcv buffer");
     }
 
+    /// removes consecutive data from the buffer starting at the earliest sequence number in the buffer
+    pub fn pop_first(&mut self) -> Option<Vec<u8>> {
+        self.seq_first().and_then(|seq| self.pop(seq))
+    }
+
     /// removes consecutive data from the buffer starting at the provided seq number
     pub fn pop(&mut self, seq: u32) -> Option<Vec<u8>> {
         if self.data.is_empty() {

@@ -11,9 +11,18 @@ pub enum EthErr {
     #[error("{0}")]
     MacError(String),
     #[error("{0}")]
-    IpError(#[from] IpErr),
+    IpError(String),
     #[error("unsupported eternet protocol")]
-    InvalidProtError,
+    UnsupportedProtocol,
     #[error("{0}")]
     ConversionError(String),
+}
+
+impl From<IpErr> for EthErr {
+    fn from(value: IpErr) -> Self {
+        match value {
+            IpErr::UnsupportedProtocol => EthErr::UnsupportedProtocol,
+            _ => EthErr::IpError(value.to_string()),
+        }
+    }
 }
