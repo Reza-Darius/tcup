@@ -149,7 +149,7 @@ pub async fn active_open(skcb: &mut SKCB, remote_addr: SocketAddrV4) -> Result<(
     skcb.tcb.rcv_opts = opts;
 
     tcp_hdr.set_syn();
-    skcb.output(tcp_hdr, opts, &[]).await?;
+    skcb.output(tcp_hdr, opts, None).await?;
 
     skcb.change_state(TCPState::SynSent);
     skcb.open = Open::Active;
@@ -217,7 +217,7 @@ async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     tcp_hdr.set_ack();
     tcp_hdr.set_len(TCP_HDR_MINSIZE + opts.len());
 
-    skcb.output(tcp_hdr, opts, &[]).await?;
+    skcb.output(tcp_hdr, opts, None).await?;
     skcb.change_state(TCPState::SynReceived);
 
     Ok(())
@@ -272,7 +272,7 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         };
 
         tcp_hdr.set_rst();
-        skcb.output(tcp_hdr, TCPOpts::default(), &[]).await?;
+        skcb.output(tcp_hdr, TCPOpts::default(), None).await?;
     }
 
     if hdr.is_fin() {
@@ -342,7 +342,7 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
             tcp_hdr.set_syn();
             tcp_hdr.set_ack();
 
-            skcb.output(tcp_hdr, TCPOpts::default(), &[]).await?;
+            skcb.output(tcp_hdr, TCPOpts::default(), None).await?;
             skcb.change_state(TCPState::SynReceived);
 
             // TODO:

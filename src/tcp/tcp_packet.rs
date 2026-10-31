@@ -169,6 +169,7 @@ impl PseudoHdr {
     }
 }
 
+/// a buffer that can house headers with a TCP payload
 pub struct TCPPayload {
     data: Vec<u8>,
     offset: usize, // the offset of the actual TCP payload, as the buffer retains ETH/IP info
@@ -176,7 +177,9 @@ pub struct TCPPayload {
 
 impl TCPPayload {
     /// the caller is responsible for placing the payload at the correct offset
-    pub fn from_vec(data: Vec<u8>, offset: usize) -> Self{
+    ///
+    /// offset should be ETH_HDR_SIZE + IP_HDR_MINSIZE + tcp header size
+    pub fn from_vec(data: Vec<u8>, offset: usize) -> Self {
         TCPPayload { data, offset }
     }
 
@@ -184,8 +187,13 @@ impl TCPPayload {
         &self.data[self.offset..]
     }
 
+    /// len of the payload
     pub fn len(&self) -> usize {
         self.data.len() - self.offset
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset
     }
 }
 
@@ -210,18 +218,21 @@ impl Packet<TCP> {
         dip: Ipv4Addr,
         mut hdr: TCPHdr,
         opts: TCPOpts,
-        payload: &[u8],
+        payload: Option<TCPPayload>,
     ) -> Packet<IP> {
         hdr.set_len(TCP_HDR_MINSIZE + opts.len());
         let payload_offset = ETH_HDR_SIZE + IP_HDR_MINSIZE as usize + hdr.len();
 
-        debug_assert!(payload_offset + payload.len() <= ETH_FRAME_MAX_SIZE);
+        // data is the entire buffer, payload len the len of the TCP payload only
+        let (data, payload_len) = match payload {
+            Some(payload) => {
+                let payload_len = payload.len();
+                (payload.data, payload_len)
+            }
+            None => (vec![0; payload_offset], 0),
+        };
 
-        let mut data = Vec::with_capacity(payload_offset + payload.len());
-
-        // make space for all the headers and write the payload
-        data.resize(payload_offset, 0);
-        data.extend_from_slice(payload);
+        debug_assert!(payload_offset + payload_len <= ETH_FRAME_MAX_SIZE);
 
         let mut packet = Packet::<TCP>::from_vec(data);
 
@@ -230,7 +241,7 @@ impl Packet<TCP> {
         packet.set_checksum(PseudoHdr::new(
             sip,
             dip,
-            hdr.len() as u16 + payload.len() as u16,
+            hdr.len() as u16 + payload_len as u16,
         ));
 
         let packet = Packet::<IP>::new(sip, dip, packet.into()).unwrap();
@@ -239,8 +250,7 @@ impl Packet<TCP> {
             packet.len() == ETH_HDR_SIZE + IP_HDR_MINSIZE as usize + packet.payload().len()
         );
         debug_assert!(
-            packet.hdr().tot_len()
-                == IP_HDR_MINSIZE as u16 + hdr.len() as u16 + payload.len() as u16
+            packet.hdr().tot_len() == IP_HDR_MINSIZE as u16 + hdr.len() as u16 + payload_len as u16
         );
 
         packet
@@ -535,6 +545,16 @@ mod tests {
         h.set_syn();
         h.win_size = 1024.into();
         h.set_len(TCP_HDR_MINSIZE + opts.len());
+
+        let payload = if payload.is_empty() {
+            None
+        } else {
+            let offset = ETH_HDR_SIZE + IP_HDR_MINSIZE as usize + h.len();
+            let mut v = vec![0; offset];
+            v.extend_from_slice(payload);
+            Some(TCPPayload::from_vec(v, offset))
+        };
+
         Packet::<TCP>::new(
             Ipv4Addr::new(10, 0, 0, 1),
             Ipv4Addr::new(10, 0, 0, 2),

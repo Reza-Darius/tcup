@@ -44,6 +44,7 @@ async fn main() {
         .await
         .unwrap()
         .await
+        .unwrap()
         .unwrap();
 
     assert_eq!(&rcv, data.as_bytes());

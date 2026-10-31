@@ -37,7 +37,7 @@ impl SendBuf {
     /// never gives out more than TCP_SEG_MAX_SIZE bytes
     pub fn get_new_seg(&mut self, len: u32) -> Option<&[u8]> {
         let len = len as usize;
-        if self.count == self.data.len() {
+        if len == 0 || self.count == self.data.len() {
             return None;
         }
 

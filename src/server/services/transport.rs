@@ -44,8 +44,8 @@ impl TransportService for TCPServiceV1 {
             TCPCall::Connect(_) => todo!(),
             TCPCall::Listen(addr) => self.new_listen(addr).await,
             TCPCall::Close => todo!(),
-            TCPCall::Send(items) => todo!(),
-            TCPCall::Receive((con, sender)) => {
+            TCPCall::Send { con, data, resp } => todo!(),
+            TCPCall::Receive { con, resp } => {
                 debug!("servicing receive call");
 
                 if let Some(socket) = self
@@ -54,7 +54,7 @@ impl TransportService for TCPServiceV1 {
                     .and_then(|sock_id| self.socket_table.get(*sock_id))
                 {
                     socket
-                        .call(crate::tcp::socket::SocketMessage::Receive(sender))
+                        .call(crate::tcp::socket::SocketMessage::Receive { resp })
                         .await
                 } else {
                     Err(TCPError::SocketError("socket not found".into()))

@@ -12,7 +12,8 @@ use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::server::services::arp_svc::ARPServiceHandle;
 use crate::tcp::buffer::{RecvBuf, SendBuf};
 use crate::tcp::error::TCPError::{self};
-use crate::tcp::handler::seg_handler;
+use crate::tcp::handler::{TCP_HDR_MINSIZE, seg_handler};
+use crate::tcp::tcp_packet::{TCP_HDR_OFFSET, TCPPayload};
 use crate::tcp::{
     opts::TCPOpts,
     rto::RTO,
@@ -72,7 +73,7 @@ pub struct SKCBInner {
     pub rcv_buf: RecvBuf,
 
     /// pending RECEIVE user calls
-    pub pending_rcv: VecDeque<oneshot::Sender<Vec<u8>>>,
+    pub pending_rcv: VecDeque<oneshot::Sender<Result<Vec<u8>>>>,
 }
 
 #[derive(Debug)]
@@ -220,20 +221,21 @@ impl SKCB {
                 seg_handler(self, packet).await?;
             }
             // TODO: how do we deal with multiple receive calls?
-            SocketMessage::Receive(sender) => {
+            SocketMessage::Receive { resp } => {
                 if !self.is_synchronized() {
-                    self.pending_rcv.push_back(sender);
+                    self.pending_rcv.push_back(resp);
                     return Ok(());
                 }
 
                 if let Some(data) = self.rcv_buf.pop_first() {
-                    sender.send(data);
+                    resp.send(Ok(data)).expect("this should always work");
                 } else {
-                    self.pending_rcv.push_back(sender);
+                    self.pending_rcv.push_back(resp);
                     debug!("cant service receive request")
                 }
             }
-            SocketMessage::Send(data) => {
+            SocketMessage::Send { data, resp } => {
+                // TODO: return a "buffer is full" error
                 self.snd_buf.insert(data);
             }
             SocketMessage::Status(sender) => {
@@ -273,7 +275,7 @@ impl SKCB {
             .snd_una
             .wrapping_add(self.tcb.snd_wnd as u32)
             .wrapping_sub(self.tcb.snd_nxt)
-            .min(self.tcb.snd_wnd as u32)
+        // .min(self.tcb.snd_wnd as u32)
     }
 
     pub(super) fn is_synchronized(&self) -> bool {
@@ -283,16 +285,24 @@ impl SKCB {
         )
     }
 
-    fn try_send(&mut self) -> Option<&[u8]> {
+    /// checks the snd buffer for data to send
+    ///
+    /// pass the size of the lenght of TCP options for the correct offset
+    fn get_snd_data(&mut self, opt_len: usize) -> Option<TCPPayload> {
         if !matches!(self.status, TCPState::Established | TCPState::CloseWait) {
             return None;
         }
-        let n_send_bytes = self.tcb.snd_una + self.tcb.snd_wnd as u32 - self.tcb.snd_nxt;
-        if let Some(data) = self.snd_buf.get_new_seg(n_send_bytes) {
-            self.tcb.snd_nxt += data.len() as u32;
-            return Some(data)
-        }
-        None
+
+        let n_send_bytes = self.usable_window();
+        let data = self.snd_buf.get_new_seg(n_send_bytes)?;
+        let offset = TCP_HDR_OFFSET + TCP_HDR_MINSIZE + opt_len;
+        let data_len = data.len() as u32;
+
+        let mut v = vec![0; offset];
+        v.extend_from_slice(data);
+
+        self.tcb.snd_nxt = self.tcb.snd_nxt.wrapping_add(data_len);
+        Some(TCPPayload::from_vec(v, opt_len))
     }
 
     /// updates the control block
@@ -313,10 +323,10 @@ impl SKCB {
 
     /// sends a packet out through the open connection
     pub(super) async fn output(
-        &self,
+        &mut self,
         tcp_hdr: TCPHdr,
         opts: TCPOpts,
-        tcp_pay: &[u8],
+        tcp_pay: Option<TCPPayload>,
     ) -> Result<()> {
         let con = self.con();
         let packet = Packet::<TCP>::new(con.local_ip, con.remote_ip, tcp_hdr, opts, tcp_pay);
@@ -329,10 +339,11 @@ impl SKCB {
     /// sends an ack based on current control block values
     ///
     /// can also serve as challenge ack
-    pub(super) async fn send_ack(&self) -> Result<()> {
+    pub(super) async fn send_ack(&mut self) -> Result<()> {
         let mut tcp_hdr = self.hdr_t();
         tcp_hdr.set_ack();
-        self.output(tcp_hdr, TCPOpts::default(), &[]).await
+        let payload = self.get_snd_data(0);
+        self.output(tcp_hdr, TCPOpts::default(), payload).await
     }
 
     pub(super) async fn send_fin(&mut self) -> Result<()> {
@@ -342,7 +353,8 @@ impl SKCB {
         self.tcb.snd_nxt = self.tcb.snd_nxt.wrapping_add(1);
 
         tcp_hdr.set_fin();
-        self.output(tcp_hdr, TCPOpts::default(), &[]).await
+        let payload = self.get_snd_data(0);
+        self.output(tcp_hdr, TCPOpts::default(), payload).await
     }
 
     pub(super) async fn send_fin_ack(&mut self) -> Result<()> {
@@ -354,10 +366,11 @@ impl SKCB {
         tcp_hdr.set_fin();
         tcp_hdr.set_ack();
 
-        self.output(tcp_hdr, TCPOpts::default(), &[]).await
+        let payload = self.get_snd_data(0);
+        self.output(tcp_hdr, TCPOpts::default(), payload).await
     }
 
-    pub(super) async fn send_rst(&self) -> Result<()> {
+    pub(super) async fn send_rst(&mut self) -> Result<()> {
         let inner = &self.inner;
         let mut tcp_hdr = self.hdr_t();
 
@@ -378,7 +391,7 @@ impl SKCB {
             }
         }
 
-        self.output(tcp_hdr, TCPOpts::default(), &[]).await
+        self.output(tcp_hdr, TCPOpts::default(), None).await
     }
 
     /// checks for acceptable ACK
@@ -469,7 +482,7 @@ impl SKCB {
             self.pending_rcv
                 .pop_front()
                 .expect("we just checked")
-                .send(data)
+                .send(Ok(data))
                 .expect("the receiver should block on this call");
         }
     }

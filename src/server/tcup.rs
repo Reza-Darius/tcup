@@ -7,7 +7,10 @@ use crate::{
         transport::{TCPServiceV1, TransportService},
     },
     tap::device::TAPDeviceOptions,
-    tcp::socket::{TCPCall, TCPCon},
+    tcp::{
+        TCPError,
+        socket::{TCPCall, TCPCon},
+    },
     utils::packet::{ETH, IP, Packet},
 };
 use anyhow::Result;
@@ -38,7 +41,7 @@ impl TCupHandle {
         &self,
         virt_host: SocketAddrV4,
         client: SocketAddrV4,
-    ) -> Result<oneshot::Receiver<Vec<u8>>> {
+    ) -> Result<oneshot::Receiver<Result<Vec<u8>, TCPError>>> {
         let con = TCPCon {
             local_ip: *virt_host.ip(),
             local_port: virt_host.port(),
@@ -46,7 +49,7 @@ impl TCupHandle {
             remote_port: client.port(),
         };
         let (tx, rx) = oneshot::channel();
-        self.sender.send(TCPCall::Receive((con, tx))).await?;
+        self.sender.send(TCPCall::Receive { con, resp: tx }).await?;
         Ok(rx)
     }
 }
@@ -166,7 +169,10 @@ impl TCupServer {
         Ok(())
     }
 
-    async fn recv_data(&mut self, addr: SocketAddrV4) -> Result<oneshot::Receiver<Vec<u8>>> {
+    async fn recv_data(
+        &mut self,
+        addr: SocketAddrV4,
+    ) -> Result<oneshot::Receiver<Result<Vec<u8>, TCPError>>> {
         let con = TCPCon {
             local_ip: *self.virt_host.ip(),
             local_port: 4000,
@@ -175,7 +181,7 @@ impl TCupServer {
         };
         let (tx, rx) = oneshot::channel();
         self.trans_svc
-            .service_request(TCPCall::Receive((con, tx)))
+            .service_request(TCPCall::Receive { con, resp: tx })
             .await?;
         Ok(rx)
     }

@@ -50,7 +50,7 @@ pub async fn no_socket_found(seg: Packet<TCP>) -> Option<Packet<IP>> {
         ip_hdr.sip(),
         resp_hdr,
         TCPOpts::default(),
-        &[],
+        None,
     ))
 }
 
@@ -117,7 +117,7 @@ impl Socket {
     }
 
     pub async fn close(self) {
-        if self.sender.send(SocketMessage::Close).await.is_err(){
+        if self.sender.send(SocketMessage::Close).await.is_err() {
             self.worker_handle.abort();
         };
     }
@@ -169,9 +169,15 @@ pub enum TCPCall {
     Connect((SocketAddrV4, oneshot::Sender<TCPCon>)),
     Listen(SocketAddrV4),
     Close,
-
-    Send((TCPCon, Vec<u8>)),
-    Receive((TCPCon, oneshot::Sender<Vec<u8>>)),
+    Send {
+        con: TCPCon,
+        data: Vec<u8>,
+        resp: oneshot::Sender<Result<(), TCPError>>,
+    },
+    Receive {
+        con: TCPCon,
+        resp: oneshot::Sender<Result<Vec<u8>, TCPError>>,
+    },
     Segment(Packet<TCP>),
 }
 
@@ -186,8 +192,13 @@ impl From<Packet<TCP>> for TCPCall {
 pub enum SocketMessage {
     /// user calls
     Close,
-    Send(Vec<u8>),
-    Receive(oneshot::Sender<Vec<u8>>),
+    Send {
+        data: Vec<u8>,
+        resp: oneshot::Sender<Result<(), TCPError>>,
+    },
+    Receive {
+        resp: oneshot::Sender<Result<Vec<u8>, TCPError>>,
+    },
     Status(oneshot::Sender<TCPState>),
 
     /// incoming packet
