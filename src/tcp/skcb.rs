@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
@@ -70,7 +71,8 @@ pub struct SKCBInner {
     /// buffer for incoming data
     pub rcv_buf: RecvBuf,
 
-    pub pending_req: Option<oneshot::Sender<Vec<u8>>>,
+    /// pending RECEIVE user calls
+    pub pending_rcv: VecDeque<oneshot::Sender<Vec<u8>>>,
 }
 
 #[derive(Debug)]
@@ -162,7 +164,7 @@ impl SKCB {
                 l_addr: addr,
                 r_addr: None,
 
-                pending_req: None,
+                pending_rcv: VecDeque::new(),
             }),
         };
 
@@ -171,7 +173,6 @@ impl SKCB {
     }
 
     /// event loop listening for user calls, data segments and timers
-    #[instrument(name = "TCP", skip_all, fields(state = ?self.status))]
     pub async fn run(mut self) -> Result<()> {
         // we need to linger after closing the socket before reopening it as to not confuse
         // packets for the old connection
@@ -205,28 +206,36 @@ impl SKCB {
         }
     }
 
+    #[instrument(name = "TCP", skip_all, fields(state = ?self.status))]
     async fn handle_user_call(&mut self, message: SocketMessage) -> Result<()> {
         match message {
             SocketMessage::Close => todo!(),
             SocketMessage::Segment(packet) => {
+                if let Some(remote_addr) = self.r_addr
+                    && remote_addr != packet.s_addr()
+                {
+                    return Ok(());
+                }
                 self.update_tcb(&packet);
                 seg_handler(self, packet).await?;
             }
             // TODO: how do we deal with multiple receive calls?
             SocketMessage::Receive(sender) => {
                 if !self.is_synchronized() {
-                    self.pending_req = Some(sender);
+                    self.pending_rcv.push_back(sender);
                     return Ok(());
                 }
 
                 if let Some(data) = self.rcv_buf.pop_first() {
                     sender.send(data);
                 } else {
-                    self.pending_req = Some(sender);
+                    self.pending_rcv.push_back(sender);
                     debug!("cant service receive request")
                 }
             }
-            SocketMessage::Send(data) => todo!(),
+            SocketMessage::Send(data) => {
+                self.snd_buf.insert(data);
+            }
             SocketMessage::Status(sender) => {
                 sender.send(self.status).expect("the rcv cant be closed");
             }
@@ -274,11 +283,16 @@ impl SKCB {
         )
     }
 
-    fn try_send(&mut self) -> Result<Option<u16>> {
+    fn try_send(&mut self) -> Option<&[u8]> {
         if !matches!(self.status, TCPState::Established | TCPState::CloseWait) {
-            return Ok(None);
+            return None;
         }
-        todo!()
+        let n_send_bytes = self.tcb.snd_una + self.tcb.snd_wnd as u32 - self.tcb.snd_nxt;
+        if let Some(data) = self.snd_buf.get_new_seg(n_send_bytes) {
+            self.tcb.snd_nxt += data.len() as u32;
+            return Some(data)
+        }
+        None
     }
 
     /// updates the control block
@@ -449,14 +463,14 @@ impl SKCB {
 
     /// tries to pull bytes out of the rcv buffer if we have a pending request
     pub(super) fn try_empty_rcv_buffer(&mut self) {
-        if !self.is_synchronized() {
-            return;
-        }
-
-        if let Some(sender) = self.pending_req.take()
+        if !self.pending_rcv.is_empty() // we dont pop front to not lose the sender
             && let Some(data) = self.rcv_buf.pop_first()
         {
-            let _ = sender.send(data);
+            self.pending_rcv
+                .pop_front()
+                .expect("we just checked")
+                .send(data)
+                .expect("the receiver should block on this call");
         }
     }
 }

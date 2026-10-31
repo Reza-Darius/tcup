@@ -175,6 +175,11 @@ pub struct TCPPayload {
 }
 
 impl TCPPayload {
+    /// the caller is responsible for placing the payload at the correct offset
+    pub fn from_vec(data: Vec<u8>, offset: usize) -> Self{
+        TCPPayload { data, offset }
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.data[self.offset..]
     }

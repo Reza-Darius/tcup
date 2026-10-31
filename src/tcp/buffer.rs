@@ -35,7 +35,8 @@ impl SendBuf {
     /// retrieve N bytes of new data
     ///
     /// never gives out more than TCP_SEG_MAX_SIZE bytes
-    pub fn get_new_seg(&mut self, len: usize) -> Option<&[u8]> {
+    pub fn get_new_seg(&mut self, len: u32) -> Option<&[u8]> {
+        let len = len as usize;
         if self.count == self.data.len() {
             return None;
         }
@@ -124,7 +125,7 @@ impl RecvBuf {
             self.base = seq;
         }
 
-        tracing::debug!(seq, ?data, "inserted data");
+        debug!(seq, ?data, "inserted data");
 
         match self.data.entry(self.key(seq)) {
             std::collections::btree_map::Entry::Vacant(vacant_entry) => {
@@ -166,37 +167,32 @@ impl RecvBuf {
 
         let idx = self.key(seq);
         let mut data = self.data.remove(&idx)?;
-        let mut clean_up = Vec::new();
         let mut removed_bytes = data.len();
 
         // we loop through the map such that we assemble one byte vector
         // segments and their associated data might overlap so we have to account for that
-        for entry in self.data.iter() {
-            let e_seg = *entry.0;
+        self.data.retain(|&e_seg, e_data| {
             let lo = idx;
             let hi = idx + data.len() as u32;
+            let mut retain = true;
             if e_seg >= lo && e_seg <= hi {
-                clean_up.push(e_seg);
-                removed_bytes += entry.1.len();
+                retain = false;
+                removed_bytes += e_data.len();
 
-                if e_seg + entry.1.len() as u32 > hi {
+                if e_seg + e_data.len() as u32 > hi {
                     if e_seg < hi {
-                        warn!("overlapping data found");
+                        debug!("overlapping data found");
                     }
 
                     let dif = hi - e_seg;
                     data.truncate(data.len() - dif as usize);
-                    data.extend_from_slice(entry.1);
+                    data.extend_from_slice(e_data);
                 }
                 // in case of fully contained segments we can remove it without extending data
             }
-        }
 
-        // we have to do this cause the above loop borrows the map immutably ugh
-        for n in clean_up.iter() {
-            let r = self.data.remove(n);
-            debug_assert!(r.is_some());
-        }
+            retain
+        });
 
         self.n_bytes -= removed_bytes as u32;
         debug!(

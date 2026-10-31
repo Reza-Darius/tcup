@@ -116,6 +116,12 @@ impl Socket {
         self.worker_handle.is_finished()
     }
 
+    pub async fn close(self) {
+        if self.sender.send(SocketMessage::Close).await.is_err(){
+            self.worker_handle.abort();
+        };
+    }
+
     pub async fn status(&self) -> TCPState {
         if self.is_closed() {
             return TCPState::Closed;
@@ -145,6 +151,16 @@ pub struct TCPCon {
     pub local_port: u16,
     pub remote_ip: Ipv4Addr,
     pub remote_port: u16,
+}
+
+impl TCPCon {
+    pub fn local(&self) -> SocketAddrV4 {
+        SocketAddrV4::new(self.local_ip, self.local_port)
+    }
+
+    pub fn remote(&self) -> SocketAddrV4 {
+        SocketAddrV4::new(self.remote_ip, self.remote_port)
+    }
 }
 
 /// user facing interface

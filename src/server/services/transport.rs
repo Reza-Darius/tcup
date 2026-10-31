@@ -92,7 +92,7 @@ impl TCPServiceV1 {
     #[instrument(name = "TCPService", skip_all, fields(con = ?segment.con()))]
     async fn service_segment(&mut self, segment: Packet<TCP>) -> Result<(), TCPError> {
         let seg_con = segment.con();
-        let listen_addr = SocketAddrV4::new(seg_con.local_ip, seg_con.local_port);
+        let listen_addr = seg_con.local();
 
         // check for established connection
         if let Some(con_sock) = self

@@ -3,7 +3,7 @@ use std::{cmp::max, task::Poll};
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::tcp::timer::CLOCK_GRAN;
+use crate::tcp::timer::CLOCK_GRANULARITY;
 use pin_project_lite::pin_project;
 use tokio::time::Instant;
 use tracing::trace;
@@ -80,7 +80,7 @@ impl RTO {
         if *this.first_measure {
             let srtt = rtt;
             let rttvar = rtt / 2;
-            let rto_calc = srtt + max(Duration::from_millis(CLOCK_GRAN), 4 * rttvar);
+            let rto_calc = srtt + max(Duration::from_millis(CLOCK_GRANULARITY), 4 * rttvar);
 
             *this.srtt = srtt;
             *this.rttvar = rttvar;
@@ -93,7 +93,7 @@ impl RTO {
 
             let rttvar = this.rttvar.mul_f32(1f32 - BETA) + this.srtt.abs_diff(rtt).mul_f32(BETA);
             let srtt = this.srtt.mul_f32(1f32 - ALPHA) + rtt.mul_f32(ALPHA);
-            let rto_calc = srtt + max(Duration::from_millis(CLOCK_GRAN), 4 * rttvar);
+            let rto_calc = srtt + max(Duration::from_millis(CLOCK_GRANULARITY), 4 * rttvar);
 
             *this.srtt = srtt;
             *this.rttvar = rttvar;

@@ -6,8 +6,6 @@ use std::{
 use derive_more::Display;
 use siphasher::sip::SipHasher13;
 
-use crate::tcp::timer::TICK;
-
 use super::socket::TCPCon;
 
 #[derive(Debug, Clone, Copy, Display)]
@@ -18,8 +16,7 @@ impl Seq {
         let key: &[u8; 16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let mut hasher = SipHasher13::new_with_key(key);
 
-        TICK.load(std::sync::atomic::Ordering::Relaxed)
-            .hash(&mut hasher);
+        42.hash(&mut hasher);
         con.hash(&mut hasher);
 
         Seq(hasher.finish() as u32)
@@ -46,8 +43,7 @@ pub fn new_isn(con: &TCPCon) -> u32 {
     let key: &[u8; 16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let mut hasher = SipHasher13::new_with_key(key);
 
-    TICK.load(std::sync::atomic::Ordering::Relaxed)
-        .hash(&mut hasher);
+    42.hash(&mut hasher);
     con.hash(&mut hasher);
 
     hasher.finish() as u32
