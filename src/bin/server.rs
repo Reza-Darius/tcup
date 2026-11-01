@@ -5,8 +5,6 @@ use std::{
     time::Duration,
 };
 
-use tracing::info;
-
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -25,32 +23,34 @@ async fn main() {
 
     let mut socket = tcup.listen(virt_host).await.unwrap();
     let data = "hello to TCP! Here is some Data! And Some More!";
+    let response = "response from TCUP! Yippie";
 
+    // give some time for the listening socket to setup
     std::thread::sleep(Duration::from_secs(2));
 
     let handler = std::thread::spawn(move || {
         let mut stream = TcpStream::connect(virt_host).unwrap();
 
         for slice in data.split_inclusive('!') {
-            info!(slice, "sending data");
-
             stream.write_all(slice.as_bytes()).unwrap();
         }
 
         let mut buf = vec![0; 100];
         let nbyte = stream.read(&mut buf).unwrap();
 
-        info!("read {} bytes", nbyte);
+        assert_eq!(nbyte, response.len());
+        println!("sent all bytes");
     });
 
+    // sleep to make sure we get all the data in one swoop since TCP doesnt make any promise about
+    // message boundaries
     std::thread::sleep(Duration::from_secs(2));
 
     let rcv = socket.recv().await.unwrap();
 
     assert_eq!(&rcv, data.as_bytes());
-    info!("got all bytes!");
+    println!("got all bytes");
 
-    socket.send("response from TCUP! Yippie").await.unwrap();
-    std::thread::sleep(Duration::from_secs(2));
+    socket.send(response.as_bytes()).await.unwrap();
     handler.join().unwrap();
 }

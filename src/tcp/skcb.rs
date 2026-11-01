@@ -193,7 +193,11 @@ impl SKCB {
                     trace!("RTO expired");
                 }
                 res = self.inner.in_chan.recv() => {
-                    let msg = res.expect("assert: the channel cant be closed");
+                    let Some(msg) = res else {
+
+                        debug!("receive channel closed, closing socket");
+                        return Ok(());
+                    };
                     if let Err(e) = self.handle_user_call(msg).await {
                         error!(%e);
                     };

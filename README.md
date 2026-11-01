@@ -7,6 +7,7 @@
 Tcup is an asynchronous virtual networking interface capable of handling TCP/IP traffic
 
 ## Working Features
+
 - uses linux TAP devices to create a virtual interface
 - Layer 2 packet switching: Ethernet Frames (RFC 1042) and ARP (RFC 826)
 - ICMP echoes (RFC 792)
@@ -22,57 +23,67 @@ Tcup is an asynchronous virtual networking interface capable of handling TCP/IP 
 
 ```rust
 use std::{
-    io::Write,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream},
+    io::{Read, Write},
+    net::{Ipv4Addr, SocketAddrV4, TcpStream},
     str::FromStr,
     time::Duration,
 };
 
-
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
+
     // configuring the tap interface
     let if_name = "tcup0";
     let if_addr = "10.0.0.1";
     let subnet = 24;
 
-    // a fake host listening
+    // we need a fake host that listens behind our newly created interfaace
     let virt_host = SocketAddrV4::new(Ipv4Addr::from_str("10.0.0.2").unwrap(), 4000);
 
     let tcup = tcup::server::init(if_name, (if_addr.parse().unwrap(), subnet), virt_host)
         .await
         .unwrap();
 
-    std::thread::sleep(Duration::from_secs(2));
-
-    let mut stream = TcpStream::connect(virt_host).unwrap();
+    let mut socket = tcup.listen(virt_host).await.unwrap();
     let data = "hello to TCP! Here is some Data! And Some More!";
+    let response = "response from TCUP! Yippie";
 
-    for slice in data.split_inclusive('!') {
-        stream.write_all(slice.as_bytes()).unwrap();
-    }
-
-    let SocketAddr::V4(addr) = stream.local_addr().unwrap() else {
-        panic!()
-    };
-
+    // give some time for the listening socket to setup
     std::thread::sleep(Duration::from_secs(2));
 
-    let rcv = tcup
-        .request_data(virt_host, addr)
-        .await
-        .unwrap()
-        .await
-        .unwrap();
+    let handler = std::thread::spawn(move || {
+        let mut stream = TcpStream::connect(virt_host).unwrap();
+
+        for slice in data.split_inclusive('!') {
+            stream.write_all(slice.as_bytes()).unwrap();
+        }
+
+        let mut buf = vec![0; 100];
+        let nbyte = stream.read(&mut buf).unwrap();
+
+        assert_eq!(nbyte, response.len());
+        println!("sent all bytes");
+    });
+
+    // sleep to make sure we get all the data in one swoop since TCP doesnt make any promise about
+    // message boundaries
+    std::thread::sleep(Duration::from_secs(2));
+
+    let rcv = socket.recv().await.unwrap();
 
     assert_eq!(&rcv, data.as_bytes());
-}
+    println!("got all bytes");
 
+    socket.send(response.as_bytes()).await.unwrap();
+    handler.join().unwrap();
+}
 ```
 
 ## Getting Started (coming soon)
 
 build with cargo
+
 ```
 cargo install tcup
 ```
