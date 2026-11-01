@@ -63,8 +63,9 @@ impl From<Packet<IP>> for ARPServiceMessage {
     }
 }
 
-// TODO: retry pending arp requests
-// TODO: deal with stale entries
+// TODO: 
+// - retry pending arp requests
+// - deal with stale entries
 #[derive(Debug)]
 pub struct ARPService {
     link_sink: Sender<TAPActorMessage>,

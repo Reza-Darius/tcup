@@ -197,8 +197,10 @@ impl TCPCon {
     }
 }
 
-/// user facing interface
-pub enum SocketCall {
+/// calls for the service worker, like allocating new sockets
+/// 
+/// data transfer between user and socket is handled by SKCBMessages below
+pub enum SocketServiceCall {
     Connect {
         remote_addr: SocketAddrV4,
         resp: oneshot::Sender<Result<SocketUserHandle, TCPError>>,
@@ -212,24 +214,10 @@ pub enum SocketCall {
     Close {
         socket_key: usize,
     },
-
-    // TODO: these guys might need a result type too
-    // Connect((SocketAddrV4, oneshot::Sender<TCPCon>)),
-    // Listen(SocketAddrV4),
-    // Close,
-    Send {
-        con: TCPCon,
-        data: Vec<u8>,
-        resp: oneshot::Sender<Result<(), TCPError>>,
-    },
-    Receive {
-        con: TCPCon,
-        resp: oneshot::Sender<Result<Vec<u8>, TCPError>>,
-    },
     Segment(Packet<TCP>),
 }
 
-impl std::fmt::Display for SocketCall {
+impl std::fmt::Display for SocketServiceCall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Connect { remote_addr, .. } => {
@@ -241,21 +229,15 @@ impl std::fmt::Display for SocketCall {
             Self::Close { socket_key } => {
                 write!(f, "Close(socket={socket_key})")
             }
-            Self::Send { con, data, .. } => {
-                write!(f, "Send({con:?}, {} bytes)", data.len())
-            }
-            Self::Receive { con, .. } => {
-                write!(f, "Receive({con:?})")
-            }
             Self::Segment(packet) => {
                 write!(f, "Segment({packet})",)
             }
         }
     }
 }
-impl From<Packet<TCP>> for SocketCall {
+impl From<Packet<TCP>> for SocketServiceCall {
     fn from(value: Packet<TCP>) -> Self {
-        SocketCall::Segment(value)
+        SocketServiceCall::Segment(value)
     }
 }
 

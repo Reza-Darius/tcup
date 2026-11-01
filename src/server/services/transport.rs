@@ -10,7 +10,7 @@ use crate::{
     server::services::arp_svc::ARPServiceHandle,
     tcp::{
         TCPError, TCPState,
-        socket::{SocketCall, SocketInternalHandle, SocketUserHandle, TCPCon, no_socket_found},
+        socket::{SocketServiceCall, SocketInternalHandle, SocketUserHandle, TCPCon, no_socket_found},
     },
     utils::packet::{Packet, TCP},
 };
@@ -20,7 +20,7 @@ pub trait TransportService {
 
     fn service_request(
         &mut self,
-        call: SocketCall,
+        call: SocketServiceCall,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
@@ -43,49 +43,18 @@ impl TransportService for TCPServiceV1 {
     type Error = TCPError;
 
     #[instrument(skip_all fields(call = %call))]
-    async fn service_request(&mut self, call: SocketCall) -> Result<(), TCPError> {
+    async fn service_request(&mut self, call: SocketServiceCall) -> Result<(), TCPError> {
         match call {
-            SocketCall::Connect { remote_addr, resp } => todo!(),
-            SocketCall::Listen { listen_addr, resp } => {
+            SocketServiceCall::Connect { remote_addr, resp } => todo!(),
+            SocketServiceCall::Listen { listen_addr, resp } => {
                 let handle = self.new_listen(listen_addr).await;
                 // TODO: handle send error by deallocating
                 resp.send(handle);
                 Ok(())
             }
-            SocketCall::Close { socket_key } => todo!(),
+            SocketServiceCall::Close { socket_key } => todo!(),
 
-            // TODO: transport service should not service send/receive
-            SocketCall::Send { con, data, resp } => {
-                if let Some(socket) = self
-                    .con_table
-                    .get(&con)
-                    .and_then(|sock_id| self.socket_table.get(*sock_id))
-                {
-                    socket
-                        .call(crate::tcp::socket::SKCBMessage::Send { data, resp })
-                        .await
-                } else {
-                    Err(TCPError::SocketError(
-                        "connection doesnt exist: no socket found".into(),
-                    ))
-                }
-            }
-            SocketCall::Receive { con, resp } => {
-                if let Some(socket) = self
-                    .con_table
-                    .get(&con)
-                    .and_then(|sock_id| self.socket_table.get(*sock_id))
-                {
-                    socket
-                        .call(crate::tcp::socket::SKCBMessage::Receive { resp })
-                        .await
-                } else {
-                    Err(TCPError::SocketError(
-                        "connection doesnt exist: no socket found".into(),
-                    ))
-                }
-            }
-            SocketCall::Segment(packet) => self.service_segment(packet).await,
+            SocketServiceCall::Segment(packet) => self.service_segment(packet).await,
         }
     }
 }

@@ -8,8 +8,7 @@ use crate::{
     },
     tap::device::TAPDeviceOptions,
     tcp::{
-        TCPError,
-        socket::{SocketCall, SocketUserHandle, TCPCon},
+        socket::{SocketServiceCall, SocketUserHandle},
     },
     utils::packet::{ETH, IP, Packet},
 };
@@ -35,7 +34,7 @@ pub async fn init(
 /// A handle to a running TCup server used to request transport services
 #[derive(Clone)]
 pub struct TCup {
-    sender: Sender<SocketCall>,
+    sender: Sender<SocketServiceCall>,
 }
 
 impl TCup {
@@ -48,7 +47,7 @@ impl TCup {
     pub async fn listen(&self, addr: SocketAddrV4) -> Result<SocketUserHandle> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(SocketCall::Listen {
+            .send(SocketServiceCall::Listen {
                 listen_addr: addr,
                 resp: tx,
             })
@@ -65,7 +64,7 @@ struct TCupServer {
     arp_svc: ARPServiceHandle,
     trans_svc: TCPServiceV1,
 
-    user_chan: Receiver<SocketCall>,
+    user_chan: Receiver<SocketServiceCall>,
 }
 
 impl TCupServer {
@@ -73,7 +72,7 @@ impl TCupServer {
         if_name: impl Into<String>,
         if_addr: (Ipv4Addr, u8),
         virt_addr: SocketAddrV4,
-        rx: Receiver<SocketCall>,
+        rx: Receiver<SocketServiceCall>,
     ) -> Result<Self> {
         let tap = TAPServiceHandle::new(
             if_name,
@@ -164,23 +163,6 @@ impl TCupServer {
         };
 
         Ok(())
-    }
-
-    async fn recv_data(
-        &mut self,
-        addr: SocketAddrV4,
-    ) -> Result<oneshot::Receiver<Result<Vec<u8>, TCPError>>> {
-        let con = TCPCon {
-            local_ip: *self.virt_host.ip(),
-            local_port: 4000,
-            remote_ip: *addr.ip(),
-            remote_port: addr.port(),
-        };
-        let (tx, rx) = oneshot::channel();
-        self.trans_svc
-            .service_request(SocketCall::Receive { con, resp: tx })
-            .await?;
-        Ok(rx)
     }
 }
 
