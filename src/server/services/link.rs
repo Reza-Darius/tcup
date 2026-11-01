@@ -1,39 +1,28 @@
-use std::net::IpAddr;
+use std::net::Ipv4Addr;
 
 use crate::{
     eth::Mac,
-    utils::packet::{IP, Packet},
+    utils::packet::{ETH, Packet},
 };
 
 pub trait LinkService {
-    type Sender: PacketSink + Clone;
+    type Handle: LVL2PacketSink + Clone + Send;
 
-    fn sender(&self) -> Self::Sender;
-    async fn recv(&mut self) -> Packet<IP>;
+    fn sender(&self) -> Self::Handle;
+    fn recv(&mut self) -> impl std::future::Future<Output = Packet<ETH>> + Send + 'static;
 
-    fn addr(&self) -> IpAddr;
+    fn addr(&self) -> Option<Ipv4Addr>;
     fn mac(&self) -> Mac;
 }
 
-pub trait PacketSink {
+pub trait LVL2PacketSink {
     type Error;
-    async fn service_packet(&self, packet: Packet<IP>) -> Result<(), Self::Error>;
-    async fn service_packet_batch(&self, packets: Vec<Packet<IP>>) -> Result<(), Self::Error>;
+    fn service_packet(
+        &self,
+        packet: Packet<ETH>,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static;
+    fn service_packet_batch(
+        &self,
+        packets: impl Iterator<Item = Packet<ETH>>,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static;
 }
-
-// pub struct TAPLinkServiceHandle {
-//     pub addr: Option<IpAddr>,
-//     pub mac: Mac,
-//     sender: Sender<TAPLinkServiceMessage>,
-//     receiver: Receiver<Packet<IP>>,
-// }
-//
-// pub enum TAPLinkServiceMessage {
-//     Packet(Packet<IP>),
-//     Packets(Vec<Packet<IP>>),
-// }
-//
-// pub struct TAPLinkService{
-//     tap: TAPActorHandle,
-//     arp: ARPService,
-// }

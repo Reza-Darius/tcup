@@ -11,7 +11,7 @@ use crate::{
 
 use futures::StreamExt;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tracing::{error, instrument};
+use tracing::{debug, error, instrument};
 
 pub enum TAPActorMessage {
     Packet(Packet<ETH>),
@@ -106,7 +106,10 @@ impl TAPActor {
                             error!(%e, "error when reading from stream");
                         },
                         Ok(packet) => {
-                            self.sender.send(packet).await.expect("the receiver cant be closed");
+                            if self.sender.send(packet).await.is_err() {
+                                debug!("TAP actor sender closed");
+                                break
+                            };
                         },
                         _ => {}
                     };

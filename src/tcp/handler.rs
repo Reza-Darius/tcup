@@ -160,29 +160,32 @@ pub async fn active_open(skcb: &mut SKCB, remote_addr: SocketAddrV4) -> Result<(
 /// event handler for LISTEN state
 async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     let seg_hdr = seg.hdr();
+    let con = seg.con();
+    skcb.r_addr = Some(SocketAddrV4::new(con.remote_ip, con.remote_port));
 
     if seg_hdr.is_rst() {
         trace!("dropping segment: rst check failed");
 
+        skcb.r_addr = None;
         return Err(HandlerError("got rst in listen".to_string()));
     }
 
     if seg_hdr.is_ack() {
         trace!("dropping segment: ack check failed");
 
-        return skcb.send_rst().await;
+        skcb.send_rst().await?;
+        skcb.r_addr = None;
+        return Ok(());
     }
 
     if !seg_hdr.is_syn() {
         trace!("dropping segment: syn check failed");
 
+        skcb.r_addr = None;
         return Err(HandlerError("didnt get syn in listen".to_string()));
     }
 
     // passive open:
-
-    let con = seg.con();
-    skcb.r_addr = Some(SocketAddrV4::new(con.remote_ip, con.remote_port));
 
     // configure initial sequence numbers
     skcb.tcb.iss = new_isn(&skcb.con());
@@ -535,6 +538,11 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
         skcb.tcb.snd_wnd = skcb.tcb.seg_wnd;
         skcb.tcb.snd_wl1 = seg_seq;
         skcb.tcb.snd_wl2 = seg_ack;
+
+        trace!(
+            skcb.tcb.snd_wnd,
+            skcb.tcb.snd_wl1, skcb.tcb.snd_wl2, "updating send window"
+        );
     }
 
     Ok(ackd)

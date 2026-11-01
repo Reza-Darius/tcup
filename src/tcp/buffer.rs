@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use tracing::{debug, trace, warn};
+use tracing::{debug, instrument, trace, warn};
 
 use crate::tcp::{error::TCPError, tcp_packet::TCP_SEG_MAX_SIZE};
 
@@ -32,23 +32,22 @@ impl SendBuf {
         Ok(())
     }
 
-    /// retrieve N bytes of new data
+    /// retrieve N bytes of new data that hasnt been acknowledged yet
     ///
     /// never gives out more than TCP_SEG_MAX_SIZE bytes
-    pub fn get_new_seg(&mut self, len: u32) -> Option<&[u8]> {
-        let len = len as usize;
+    #[instrument(skip(self), fields(snb_buf_count = self.count))]
+    pub fn get_new_seg(&mut self, req_len: u32) -> Option<&[u8]> {
+        let len = usize::min(req_len as usize, TCP_SEG_MAX_SIZE);
         if len == 0 || self.count == self.data.len() {
             return None;
         }
 
-        assert!(self.count + len <= self.data.len());
-
         let lo = self.count;
-        let hi = lo + usize::min(lo, TCP_SEG_MAX_SIZE);
+        let hi = usize::min(lo + req_len as usize, self.data.len());
 
         let out_slice = &self.data[lo..hi];
 
-        self.count += hi - lo;
+        trace!("got {} bytes from send buffer", out_slice.len());
         Some(out_slice)
     }
 
@@ -65,13 +64,16 @@ impl SendBuf {
     }
 
     /// mark len bytes as ACKd, moving up the cursor
-    pub fn free(&mut self, len: usize) {
-        trace!(len, "freeing send buffer");
+    pub fn free(&mut self, ackd_bytes: usize) {
+        trace!(ackd_bytes, "freeing send buffer");
 
-        assert!(self.count + len <= self.data.len());
-        self.count += len;
+        assert!(ackd_bytes <= self.data.len());
+        self.count += ackd_bytes;
+
+        // all outstanding data has been ACKd, we can reset the buffer
         if self.count == self.data.len() {
             self.clear();
+            self.count = 0;
         }
     }
 

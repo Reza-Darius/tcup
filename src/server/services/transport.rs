@@ -10,7 +10,7 @@ use crate::{
     server::services::arp_svc::ARPServiceHandle,
     tcp::{
         TCPError, TCPState,
-        socket::{Socket, TCPCall, TCPCon, no_socket_found},
+        socket::{SocketCall, SocketInternalHandle, SocketUserHandle, TCPCon, no_socket_found},
     },
     utils::packet::{Packet, TCP},
 };
@@ -18,14 +18,17 @@ use crate::{
 pub trait TransportService {
     type Error;
 
-    async fn service_request(&mut self, call: TCPCall) -> Result<(), Self::Error>;
+    fn service_request(
+        &mut self,
+        call: SocketCall,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
 pub struct TCPServiceV1 {
     /// sender to dump outgoing IP packets into
     out_svc: ARPServiceHandle,
 
-    socket_table: Slab<Socket>,
+    socket_table: Slab<SocketInternalHandle>,
 
     /// active connections
     con_table: HashMap<TCPCon, usize>,
@@ -39,28 +42,50 @@ pub struct TCPServiceV1 {
 impl TransportService for TCPServiceV1 {
     type Error = TCPError;
 
-    async fn service_request(&mut self, call: TCPCall) -> Result<(), TCPError> {
+    #[instrument(skip_all fields(call = %call))]
+    async fn service_request(&mut self, call: SocketCall) -> Result<(), TCPError> {
         match call {
-            TCPCall::Connect(_) => todo!(),
-            TCPCall::Listen(addr) => self.new_listen(addr).await,
-            TCPCall::Close => todo!(),
-            TCPCall::Send { con, data, resp } => todo!(),
-            TCPCall::Receive { con, resp } => {
-                debug!("servicing receive call");
+            SocketCall::Connect { remote_addr, resp } => todo!(),
+            SocketCall::Listen { listen_addr, resp } => {
+                let handle = self.new_listen(listen_addr).await;
+                // TODO: handle send error by deallocating
+                resp.send(handle);
+                Ok(())
+            }
+            SocketCall::Close { socket_key } => todo!(),
 
+            // TODO: transport service should not service send/receive
+            SocketCall::Send { con, data, resp } => {
                 if let Some(socket) = self
                     .con_table
                     .get(&con)
                     .and_then(|sock_id| self.socket_table.get(*sock_id))
                 {
                     socket
-                        .call(crate::tcp::socket::SocketMessage::Receive { resp })
+                        .call(crate::tcp::socket::SKCBMessage::Send { data, resp })
                         .await
                 } else {
-                    Err(TCPError::SocketError("socket not found".into()))
+                    Err(TCPError::SocketError(
+                        "connection doesnt exist: no socket found".into(),
+                    ))
                 }
             }
-            TCPCall::Segment(packet) => self.service_segment(packet).await,
+            SocketCall::Receive { con, resp } => {
+                if let Some(socket) = self
+                    .con_table
+                    .get(&con)
+                    .and_then(|sock_id| self.socket_table.get(*sock_id))
+                {
+                    socket
+                        .call(crate::tcp::socket::SKCBMessage::Receive { resp })
+                        .await
+                } else {
+                    Err(TCPError::SocketError(
+                        "connection doesnt exist: no socket found".into(),
+                    ))
+                }
+            }
+            SocketCall::Segment(packet) => self.service_segment(packet).await,
         }
     }
 }
@@ -76,19 +101,26 @@ impl TCPServiceV1 {
         }
     }
 
-    async fn new_listen(&mut self, addr: SocketAddrV4) -> Result<(), TCPError> {
+    async fn new_listen(&mut self, addr: SocketAddrV4) -> Result<SocketUserHandle, TCPError> {
         self.port_svc.register(addr.port())?;
 
         debug!(%addr, "new listening socket");
 
-        let sock = Socket::listen(self.out_svc.clone(), addr, 100);
-        let key = self.socket_table.insert(sock);
+        let sock = SocketInternalHandle::listen(self.out_svc.clone(), addr, 100);
+        let key = self.socket_table.vacant_key();
+        let user_handler = sock.user_handle(key);
+
+        self.socket_table.insert(sock);
         self.listen_table.insert(addr, key);
 
-        Ok(())
+        Ok(user_handler)
     }
 
-    // OPTIMIZE: we are requesting the status for every submitted packet, no bueno!
+    // OPTIMIZE:
+    // we are requesting the status for every submitted packet, no bueno!
+    // we should use another MPSC channel such that sockets can inform the service of state changes
+    // instead of checking after every segment when the common case is packet exchanges in the
+    // ESTABLISHED state
     #[instrument(name = "TCPService", skip_all, fields(con = ?segment.con()))]
     async fn service_segment(&mut self, segment: Packet<TCP>) -> Result<(), TCPError> {
         let seg_con = segment.con();

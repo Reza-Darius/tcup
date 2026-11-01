@@ -94,14 +94,6 @@ impl ARPService {
         ARPServiceHandle { sender: tx }
     }
 
-    pub fn get_mac(&self, target_ip: Ipv4Addr) -> Option<Mac> {
-        self.store.map.get(&target_ip).copied()
-    }
-
-    pub fn request_mac(&self, target_ip: Ipv4Addr) -> Packet<ETH> {
-        Packet::<ARP>::new_request(self.store.if_addr.0, self.store.if_addr.1, target_ip)
-    }
-
     async fn run(mut self, mut rx: Receiver<ARPServiceMessage>) {
         while let Some(msg) = rx.recv().await {
             match msg {
@@ -163,5 +155,13 @@ impl ARPService {
             .send(frame.into())
             .await
             .expect("the chan cant be closed");
+    }
+
+    pub fn get_mac(&self, target_ip: Ipv4Addr) -> Option<Mac> {
+        self.store.map.get(&target_ip).copied()
+    }
+
+    pub fn request_mac(&self, target_ip: Ipv4Addr) -> Packet<ETH> {
+        Packet::<ARP>::new_request(self.store.if_addr.0, self.store.if_addr.1, target_ip)
     }
 }

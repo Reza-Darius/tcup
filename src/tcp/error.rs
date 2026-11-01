@@ -14,4 +14,6 @@ pub enum TCPError {
     SKCBError(String),
     #[error("{0}")]
     BufferError(String),
+    #[error("channel closed")]
+    ChannelError,
 }

@@ -5,6 +5,7 @@ use tracing::error;
 use crate::{
     server::services::arp_svc::ARPServiceHandle,
     tcp::{
+        TCPError::ChannelError,
         error::TCPError::{self, SocketError},
         handler::active_open,
         opts::TCPOpts,
@@ -54,21 +55,47 @@ pub async fn no_socket_found(seg: Packet<TCP>) -> Option<Packet<IP>> {
     ))
 }
 
-pub struct SocketUserHandler {
-    sender: Sender<SocketMessage>,
+#[derive(Debug, Clone)]
+pub struct SocketUserHandle {
+    socket_key: usize,
+    sender: Sender<SKCBMessage>,
 }
 
-/// a handle to a socket
-pub struct Socket {
-    sender: Sender<SocketMessage>,
+impl SocketUserHandle {
+    pub async fn send(&mut self, data: impl Into<Vec<u8>>) -> Result<(), TCPError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(SKCBMessage::Send {
+                data: data.into(),
+                resp: tx,
+            })
+            .await
+            .map_err(|_| ChannelError)?;
+        rx.await.map_err(|_| ChannelError).flatten()
+    }
+
+    pub async fn recv(&mut self) -> Result<Vec<u8>, TCPError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(SKCBMessage::Receive { resp: tx })
+            .await
+            .map_err(|_| ChannelError)?;
+        rx.await.map_err(|_| ChannelError).flatten()
+    }
+}
+
+/// a handle to a socket for the transport service
+#[derive(Debug)]
+pub struct SocketInternalHandle {
+    sender: Sender<SKCBMessage>,
     worker_handle: tokio::task::JoinHandle<()>,
 }
 
-impl Socket {
+impl SocketInternalHandle {
     /// creates a new listening socket
-    pub fn listen(tx: ARPServiceHandle, addr: SocketAddrV4, chan_size: usize) -> Self {
+    pub fn listen(ip_tx: ARPServiceHandle, addr: SocketAddrV4, chan_size: usize) -> Self {
         let (s_tx, s_rx) = tokio::sync::mpsc::channel(chan_size);
-        let mut skcb = SKCB::new(s_rx, tx, addr);
+        let mut skcb = SKCB::new(s_rx, ip_tx, addr);
 
         let handle = tokio::spawn(async move {
             skcb.status = TCPState::Listen;
@@ -76,34 +103,41 @@ impl Socket {
             skcb.run().await.unwrap();
         });
 
-        Socket {
+        SocketInternalHandle {
             sender: s_tx,
             worker_handle: handle,
         }
     }
 
+    pub fn user_handle(&self, socket_key: usize) -> SocketUserHandle {
+        SocketUserHandle {
+            socket_key,
+            sender: self.sender.clone(),
+        }
+    }
+
     /// creates a new connection socket
     pub fn connect(
-        tx: ARPServiceHandle,
+        ip_tx: ARPServiceHandle,
         s_addr: SocketAddrV4,
         r_addr: SocketAddrV4,
         chan_size: usize,
     ) -> Self {
         let (s_tx, s_rx) = tokio::sync::mpsc::channel(chan_size);
-        let mut skcb = SKCB::new(s_rx, tx, s_addr);
+        let mut skcb = SKCB::new(s_rx, ip_tx, s_addr);
 
         let handle = tokio::spawn(async move {
             active_open(&mut skcb, r_addr).await.unwrap();
             skcb.run().await.unwrap();
         });
 
-        Socket {
+        SocketInternalHandle {
             sender: s_tx,
             worker_handle: handle,
         }
     }
 
-    pub async fn call(&self, message: SocketMessage) -> Result<(), TCPError> {
+    pub async fn call(&self, message: SKCBMessage) -> Result<(), TCPError> {
         self.sender
             .send(message)
             .await
@@ -117,7 +151,7 @@ impl Socket {
     }
 
     pub async fn close(self) {
-        if self.sender.send(SocketMessage::Close).await.is_err() {
+        if self.sender.send(SKCBMessage::Close).await.is_err() {
             self.worker_handle.abort();
         };
     }
@@ -129,7 +163,7 @@ impl Socket {
 
         let (tx, rx) = oneshot::channel();
 
-        let Ok(_) = self.sender.send(SocketMessage::Status(tx)).await else {
+        let Ok(_) = self.sender.send(SKCBMessage::Status(tx)).await else {
             return TCPState::Closed;
         };
 
@@ -137,7 +171,7 @@ impl Socket {
     }
 
     pub async fn send_seg(&self, segment: Packet<TCP>) -> TCPState {
-        let Ok(_) = self.call(SocketMessage::Segment(segment)).await else {
+        let Ok(_) = self.call(SKCBMessage::Segment(segment)).await else {
             return TCPState::Closed;
         };
         self.status().await
@@ -164,11 +198,25 @@ impl TCPCon {
 }
 
 /// user facing interface
-#[derive(Debug)]
-pub enum TCPCall {
-    Connect((SocketAddrV4, oneshot::Sender<TCPCon>)),
-    Listen(SocketAddrV4),
-    Close,
+pub enum SocketCall {
+    Connect {
+        remote_addr: SocketAddrV4,
+        resp: oneshot::Sender<Result<SocketUserHandle, TCPError>>,
+    },
+
+    Listen {
+        listen_addr: SocketAddrV4,
+        resp: oneshot::Sender<Result<SocketUserHandle, TCPError>>,
+    },
+
+    Close {
+        socket_key: usize,
+    },
+
+    // TODO: these guys might need a result type too
+    // Connect((SocketAddrV4, oneshot::Sender<TCPCon>)),
+    // Listen(SocketAddrV4),
+    // Close,
     Send {
         con: TCPCon,
         data: Vec<u8>,
@@ -181,15 +229,39 @@ pub enum TCPCall {
     Segment(Packet<TCP>),
 }
 
-impl From<Packet<TCP>> for TCPCall {
+impl std::fmt::Display for SocketCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connect { remote_addr, .. } => {
+                write!(f, "Connect({remote_addr})")
+            }
+            Self::Listen { listen_addr, .. } => {
+                write!(f, "Listen({listen_addr})")
+            }
+            Self::Close { socket_key } => {
+                write!(f, "Close(socket={socket_key})")
+            }
+            Self::Send { con, data, .. } => {
+                write!(f, "Send({con:?}, {} bytes)", data.len())
+            }
+            Self::Receive { con, .. } => {
+                write!(f, "Receive({con:?})")
+            }
+            Self::Segment(packet) => {
+                write!(f, "Segment({packet})",)
+            }
+        }
+    }
+}
+impl From<Packet<TCP>> for SocketCall {
     fn from(value: Packet<TCP>) -> Self {
-        TCPCall::Segment(value)
+        SocketCall::Segment(value)
     }
 }
 
 /// messages for a TCP connection worker
 #[derive(Debug)]
-pub enum SocketMessage {
+pub enum SKCBMessage {
     /// user calls
     Close,
     Send {
@@ -203,4 +275,18 @@ pub enum SocketMessage {
 
     /// incoming packet
     Segment(Packet<TCP>),
+}
+
+impl std::fmt::Display for SKCBMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Close => write!(f, "Close"),
+            Self::Send { data, .. } => {
+                write!(f, "Send({} bytes)", data.len())
+            }
+            Self::Receive { .. } => write!(f, "Receive"),
+            Self::Status(_) => write!(f, "Status"),
+            Self::Segment(packet) => write!(f, "Segment({packet})"),
+        }
+    }
 }

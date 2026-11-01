@@ -9,7 +9,7 @@ use crate::{
     tap::device::TAPDeviceOptions,
     tcp::{
         TCPError,
-        socket::{TCPCall, TCPCon},
+        socket::{SocketCall, SocketUserHandle, TCPCon},
     },
     utils::packet::{ETH, IP, Packet},
 };
@@ -23,34 +23,38 @@ pub async fn init(
     if_name: impl Into<String>,
     if_addr: (Ipv4Addr, u8),
     virt_addr: SocketAddrV4,
-) -> Result<TCupHandle> {
+) -> Result<TCup> {
     let (tx, rx) = channel(1024);
     let srv = TCupServer::new(if_name, if_addr, virt_addr, rx).await?;
 
     tokio::spawn(async move { srv.run().await });
 
-    Ok(TCupHandle { sender: tx })
+    Ok(TCup { sender: tx })
 }
 
-pub struct TCupHandle {
-    sender: Sender<TCPCall>,
+/// A handle to a running TCup server used to request transport services
+#[derive(Clone)]
+pub struct TCup {
+    sender: Sender<SocketCall>,
 }
 
-impl TCupHandle {
-    pub async fn request_data(
-        &self,
-        virt_host: SocketAddrV4,
-        client: SocketAddrV4,
-    ) -> Result<oneshot::Receiver<Result<Vec<u8>, TCPError>>> {
-        let con = TCPCon {
-            local_ip: *virt_host.ip(),
-            local_port: virt_host.port(),
-            remote_ip: *client.ip(),
-            remote_port: client.port(),
-        };
+impl TCup {
+    /// connect to the designated address over TCP
+    pub async fn connect(&self) -> Result<SocketUserHandle> {
+        todo!()
+    }
+
+    /// create a listening socket over TCP
+    pub async fn listen(&self, addr: SocketAddrV4) -> Result<SocketUserHandle> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send(TCPCall::Receive { con, resp: tx }).await?;
-        Ok(rx)
+        self.sender
+            .send(SocketCall::Listen {
+                listen_addr: addr,
+                resp: tx,
+            })
+            .await?;
+
+        rx.await?.map_err(Into::into)
     }
 }
 
@@ -61,7 +65,7 @@ struct TCupServer {
     arp_svc: ARPServiceHandle,
     trans_svc: TCPServiceV1,
 
-    user_chan: Receiver<TCPCall>,
+    user_chan: Receiver<SocketCall>,
 }
 
 impl TCupServer {
@@ -69,7 +73,7 @@ impl TCupServer {
         if_name: impl Into<String>,
         if_addr: (Ipv4Addr, u8),
         virt_addr: SocketAddrV4,
-        rx: Receiver<TCPCall>,
+        rx: Receiver<SocketCall>,
     ) -> Result<Self> {
         let tap = TAPServiceHandle::new(
             if_name,
@@ -79,16 +83,9 @@ impl TCupServer {
             512,
         )
         .await?;
+
         let arp = ARPService::init(tap.mac, *virt_addr.ip(), tap.sender());
-
-        let mut tcp = TCPServiceV1::new(arp.clone());
-
-        // create a test listening socket
-        tcp.service_request(crate::tcp::socket::TCPCall::Listen(SocketAddrV4::new(
-            *virt_addr.ip(),
-            virt_addr.port(),
-        )))
-        .await?;
+        let tcp = TCPServiceV1::new(arp.clone());
 
         Ok(TCupServer {
             virt_host: virt_addr,
@@ -181,7 +178,7 @@ impl TCupServer {
         };
         let (tx, rx) = oneshot::channel();
         self.trans_svc
-            .service_request(TCPCall::Receive { con, resp: tx })
+            .service_request(SocketCall::Receive { con, resp: tx })
             .await?;
         Ok(rx)
     }

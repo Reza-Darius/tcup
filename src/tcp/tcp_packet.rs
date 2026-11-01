@@ -2,7 +2,7 @@ use std::default;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use bytes::BufMut;
-use tracing::warn;
+use tracing::{trace, warn};
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16, U32};
 
 use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_HDR_SIZE, ETH_PAY_MAX_SIZE};
@@ -91,7 +91,7 @@ impl TCPHdr {
         self.len = (((len >> 2) & 0xF) << 4) as u8;
     }
 
-    /// doff - data offset
+    /// TCP header len including options
     pub fn len(&self) -> usize {
         (((self.len >> 4) & 0xF) << 2) as usize
     }
@@ -460,6 +460,15 @@ impl std::fmt::Display for TCPHdr {
             self.urg_ptr,
             flags,
         )
+    }
+}
+
+impl std::fmt::Display for Packet<TCP> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ip = self.ip_hdr();
+        let tcp = self.hdr();
+        ip.fmt(f)?;
+        tcp.fmt(f)
     }
 }
 

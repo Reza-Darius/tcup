@@ -3,17 +3,18 @@ use std::net::SocketAddrV4;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tracing::{debug, error, instrument, trace};
 
 use super::socket::TCPCon;
 use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::server::services::arp_svc::ARPServiceHandle;
+use crate::tcp::TCPError::ChannelError;
 use crate::tcp::buffer::{RecvBuf, SendBuf};
 use crate::tcp::error::TCPError::{self};
 use crate::tcp::handler::{TCP_HDR_MINSIZE, seg_handler};
-use crate::tcp::tcp_packet::{TCP_HDR_OFFSET, TCPPayload};
+use crate::tcp::tcp_packet::{TCP_HDR_OFFSET, TCP_SEG_MAX_SIZE, TCPPayload};
 use crate::tcp::{
     opts::TCPOpts,
     rto::RTO,
@@ -63,7 +64,7 @@ pub struct SKCBInner {
     pub open: Open,
 
     /// communication channel for receiving TCP data and user calls
-    pub in_chan: Receiver<SocketMessage>,
+    pub in_chan: Receiver<SKCBMessage>,
     /// sender for giving out IP packets to be handled by lower layer
     pub out_chan: ARPServiceHandle,
 
@@ -145,11 +146,7 @@ pub enum TCPState {
 }
 
 impl SKCB {
-    pub(super) fn new(
-        rx: Receiver<SocketMessage>,
-        tx: ARPServiceHandle,
-        addr: SocketAddrV4,
-    ) -> Self {
+    pub(super) fn new(rx: Receiver<SKCBMessage>, tx: ARPServiceHandle, addr: SocketAddrV4) -> Self {
         let mut skcb = SKCB {
             inner: Box::new(SKCBInner {
                 tcb: TCB::default(),
@@ -190,55 +187,90 @@ impl SKCB {
                 return Ok(());
             }
 
-            // TODO: we probably want to poll the timoeut first
-            tokio::select! {
+            tokio::select! {biased;
+                _ = &mut self.inner.tcb.rto => {
+                    // self.inner.tcb.rto.clear();
+                    trace!("RTO expired");
+                }
                 res = self.inner.in_chan.recv() => {
-                    trace!("message recieved");
                     let msg = res.expect("assert: the channel cant be closed");
                     if let Err(e) = self.handle_user_call(msg).await {
                         error!(%e);
                     };
                 }
-                _ = &mut self.inner.tcb.rto => {
-                    // self.inner.tcb.rto.clear();
-                    trace!("RTO expired");
-                }
             }
         }
     }
 
-    #[instrument(name = "TCP", skip_all, fields(state = ?self.status))]
-    async fn handle_user_call(&mut self, message: SocketMessage) -> Result<()> {
+    #[instrument(name = "TCP", skip_all, fields(state = ?self.status, call = %message))]
+    async fn handle_user_call(&mut self, message: SKCBMessage) -> Result<()> {
+        trace!("message recieved");
+
         match message {
-            SocketMessage::Close => todo!(),
-            SocketMessage::Segment(packet) => {
+            SKCBMessage::Close => todo!(),
+            SKCBMessage::Segment(packet) => {
                 if let Some(remote_addr) = self.r_addr
                     && remote_addr != packet.s_addr()
                 {
+                    trace!(packet_addr = %packet.s_addr(), ?self.r_addr, "addr mismatch, dropping segment");
                     return Ok(());
                 }
+
                 self.update_tcb(&packet);
                 seg_handler(self, packet).await?;
             }
             // TODO: how do we deal with multiple receive calls?
-            SocketMessage::Receive { resp } => {
+            SKCBMessage::Receive { resp } => {
                 if !self.is_synchronized() {
                     self.pending_rcv.push_back(resp);
                     return Ok(());
                 }
 
                 if let Some(data) = self.rcv_buf.pop_first() {
-                    resp.send(Ok(data)).expect("this should always work");
+                    resp.send(Ok(data)).map_err(|_| ChannelError)?;
                 } else {
                     self.pending_rcv.push_back(resp);
-                    debug!("cant service receive request")
+                    trace!("cant service receive request, queueing it")
                 }
             }
-            SocketMessage::Send { data, resp } => {
-                // TODO: return a "buffer is full" error
-                self.snd_buf.insert(data);
+            SKCBMessage::Send { data, resp } => {
+                if data.is_empty() {
+                    resp.send(Err(TCPError::SocketError(
+                        "send call error: empty data buffer".to_string(),
+                    )))
+                    .map_err(|_| ChannelError)?;
+                    return Ok(());
+                };
+
+                let result = match self.status {
+                    // queue up data to be sent later
+                    TCPState::SynSent | TCPState::SynReceived => self.snd_buf.insert(data),
+
+                    // send some data if we can
+                    TCPState::Established | TCPState::CloseWait => {
+                        match self.snd_buf.insert(data) {
+                            Err(e) => Err(e),
+                            Ok(_) => {
+                                let window = self.usable_window();
+                                if window > 0 {
+                                    trace!("sending data");
+                                    self.send_ack().await?;
+                                } else {
+                                    trace!(window, "cant send data: window is closed")
+                                }
+                                Ok(())
+                            }
+                        }
+                    }
+
+                    _ => Err(TCPError::SocketError(
+                        "cant send data: connection closing".into(),
+                    )),
+                };
+
+                resp.send(result).map_err(|_| ChannelError)?;
             }
-            SocketMessage::Status(sender) => {
+            SKCBMessage::Status(sender) => {
                 sender.send(self.status).expect("the rcv cant be closed");
             }
         };
@@ -293,16 +325,27 @@ impl SKCB {
             return None;
         }
 
-        let n_send_bytes = self.usable_window();
+        if seq_gt(self.tcb.snd_nxt, self.tcb.snd_una) {
+            return None;
+        }
+
+        // we request at most 1460 - opt len bytes for the payload
+        let n_send_bytes = u32::min(
+            self.usable_window(),
+            TCP_SEG_MAX_SIZE as u32 - opt_len as u32,
+        );
+
         let data = self.snd_buf.get_new_seg(n_send_bytes)?;
         let offset = TCP_HDR_OFFSET + TCP_HDR_MINSIZE + opt_len;
         let data_len = data.len() as u32;
 
-        let mut v = vec![0; offset];
-        v.extend_from_slice(data);
+        let mut v = vec![0; offset]; // get a vec with room for incoming header
+        v.extend_from_slice(data); // write payload
 
+        // advance window
         self.tcb.snd_nxt = self.tcb.snd_nxt.wrapping_add(data_len);
-        Some(TCPPayload::from_vec(v, opt_len))
+
+        Some(TCPPayload::from_vec(v, offset))
     }
 
     /// updates the control block
@@ -315,8 +358,7 @@ impl SKCB {
         let tcb = &mut self.inner.tcb;
         tcb.seg_seq = tcp_hdr.seq.get();
         tcb.seg_ack = tcp_hdr.ack.get();
-        // tcb.seg_wnd = tcp_hdr.win_size.get();
-        // tcb.snd_wnd = tcb.seg_wnd;
+        tcb.seg_wnd = tcp_hdr.win_size.get();
 
         tcb.seg_len = ip_hdr.tot_len() as u32 - ip_hdr.len() as u32 - tcp_hdr.len() as u32;
     }
@@ -341,24 +383,26 @@ impl SKCB {
     /// can also serve as challenge ack
     pub(super) async fn send_ack(&mut self) -> Result<()> {
         let mut tcp_hdr = self.hdr_t();
-        tcp_hdr.set_ack();
         let payload = self.get_snd_data(0);
+
+        tcp_hdr.set_ack();
         self.output(tcp_hdr, TCPOpts::default(), payload).await
     }
 
     pub(super) async fn send_fin(&mut self) -> Result<()> {
         let mut tcp_hdr = self.hdr_t();
+        let payload = self.get_snd_data(0);
 
         // FIN takes one seq number
         self.tcb.snd_nxt = self.tcb.snd_nxt.wrapping_add(1);
 
         tcp_hdr.set_fin();
-        let payload = self.get_snd_data(0);
         self.output(tcp_hdr, TCPOpts::default(), payload).await
     }
 
     pub(super) async fn send_fin_ack(&mut self) -> Result<()> {
         let mut tcp_hdr = self.hdr_t();
+        let payload = self.get_snd_data(0);
 
         // FIN takes one seq number
         self.tcb.snd_nxt = self.tcb.snd_nxt.wrapping_add(1);
@@ -366,7 +410,6 @@ impl SKCB {
         tcp_hdr.set_fin();
         tcp_hdr.set_ack();
 
-        let payload = self.get_snd_data(0);
         self.output(tcp_hdr, TCPOpts::default(), payload).await
     }
 
