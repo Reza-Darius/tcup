@@ -11,7 +11,7 @@ Tcup is an asynchronous virtual networking interface capable of handling TCP/IP 
 - uses linux TAP devices to create a virtual interface
 - Layer 2 packet switching: Ethernet Frames (RFC 1042) and ARP (RFC 826)
 - ICMP echoes (RFC 792)
-- TCP Listen (RFC 793)
+- TCP (RFC 793)
 
 ## Current WIP
 
@@ -38,7 +38,7 @@ async fn main() {
     let if_addr = "10.0.0.1";
     let subnet = 24;
 
-    // we need a fake host that listens behind our newly created interfaace
+    // we need a fake host that listens behind our newly created interface
     let virt_host = SocketAddrV4::new(Ipv4Addr::from_str("10.0.0.2").unwrap(), 4000);
 
     let tcup = tcup::server::init(if_name, (if_addr.parse().unwrap(), subnet), virt_host)
@@ -66,8 +66,8 @@ async fn main() {
         println!("sent all bytes");
     });
 
-    // sleep to make sure we get all the data in one swoop since TCP doesnt make any promise about
-    // message boundaries
+    // sleep to make sure we get all the data in one swoop since TCP doesnt
+    // make any promises about message boundaries
     std::thread::sleep(Duration::from_secs(2));
 
     let rcv = socket.recv().await.unwrap();
