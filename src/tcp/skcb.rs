@@ -3,7 +3,7 @@ use std::net::SocketAddrV4;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tracing::{debug, error, instrument, trace};
 
@@ -125,6 +125,8 @@ pub struct TCB {
     pub last_snd: Option<Instant>,
     pub last_rcv: Option<Instant>,
     pub rto: RTO,
+
+    pub shutdown_init: bool,
 }
 
 // https://datatracker.ietf.org/doc/html/rfc9293#name-state-machine-overview
@@ -172,21 +174,20 @@ impl SKCB {
 
     /// event loop listening for user calls, data segments and timers
     pub async fn run(mut self) -> Result<()> {
-        // we need to linger after closing the socket before reopening it as to not confuse
-        // packets for the old connection
-        //
-        // maybe we need some way to circumvent this?
-        if matches!(self.status, TCPState::TimeWait) {
-            tokio::time::sleep(Duration::new(TIME_WAIT, 0)).await;
-            return Ok(());
-        }
-
         loop {
-            if matches!(self.status, TCPState::Closed) {
-                debug!("closing socket");
-                return Ok(());
+            // we need to linger after closing the socket before reopening it as to not confuse
+            // packets for the old connection
+            if matches!(self.status, TCPState::TimeWait) {
+                tokio::time::sleep(Duration::new(TIME_WAIT, 0)).await;
+                break;
             }
 
+            if matches!(self.status, TCPState::Closed) {
+                break;
+            }
+
+            // this select is biased as to not cause a race between an incoming packet
+            // changing a packet then reacting to a fired timer
             tokio::select! {biased;
                 _ = &mut self.inner.tcb.rto => {
                     // self.inner.tcb.rto.clear();
@@ -194,9 +195,9 @@ impl SKCB {
                 }
                 res = self.inner.in_chan.recv() => {
                     let Some(msg) = res else {
-
+                        self.init_close().await?;
                         debug!("receive channel closed, closing socket");
-                        return Ok(());
+                        break;
                     };
                     if let Err(e) = self.handle_user_call(msg).await {
                         error!(%e);
@@ -204,6 +205,9 @@ impl SKCB {
                 }
             }
         }
+
+        debug!("closing socket");
+        Ok(())
     }
 
     #[instrument(name = "TCP", skip_all, fields(state = ?self.status, call = %message))]
@@ -211,7 +215,9 @@ impl SKCB {
         trace!("message recieved");
 
         match message {
-            SKCBMessage::Close => todo!(),
+            SKCBMessage::Close => {
+                self.init_close().await?;
+            }
             SKCBMessage::Segment(packet) => {
                 if let Some(remote_addr) = self.r_addr
                     && remote_addr != packet.s_addr()
@@ -275,7 +281,7 @@ impl SKCB {
                 resp.send(result).map_err(|_| ChannelError)?;
             }
             SKCBMessage::Status(sender) => {
-                sender.send(self.status).expect("the rcv cant be closed");
+                sender.send(self.status);
             }
         };
 
@@ -324,7 +330,7 @@ impl SKCB {
     /// checks the snd buffer for data to send
     ///
     /// pass the size of the lenght of TCP options for the correct offset
-    fn get_snd_data(&mut self, opt_len: usize) -> Option<TCPPayload> {
+    fn check_snd_data(&mut self, opt_len: usize) -> Option<TCPPayload> {
         if !matches!(self.status, TCPState::Established | TCPState::CloseWait) {
             return None;
         }
@@ -387,7 +393,7 @@ impl SKCB {
     /// can also serve as challenge ack
     pub(super) async fn send_ack(&mut self) -> Result<()> {
         let mut tcp_hdr = self.hdr_t();
-        let payload = self.get_snd_data(0);
+        let payload = self.check_snd_data(0);
 
         tcp_hdr.set_ack();
         self.output(tcp_hdr, TCPOpts::default(), payload).await
@@ -395,7 +401,7 @@ impl SKCB {
 
     pub(super) async fn send_fin(&mut self) -> Result<()> {
         let mut tcp_hdr = self.hdr_t();
-        let payload = self.get_snd_data(0);
+        let payload = self.check_snd_data(0);
 
         // FIN takes one seq number
         self.tcb.snd_nxt = self.tcb.snd_nxt.wrapping_add(1);
@@ -406,7 +412,7 @@ impl SKCB {
 
     pub(super) async fn send_fin_ack(&mut self) -> Result<()> {
         let mut tcp_hdr = self.hdr_t();
-        let payload = self.get_snd_data(0);
+        let payload = self.check_snd_data(0);
 
         // FIN takes one seq number
         self.tcb.snd_nxt = self.tcb.snd_nxt.wrapping_add(1);
@@ -526,12 +532,44 @@ impl SKCB {
         if !self.pending_rcv.is_empty() // we dont pop front to not lose the sender
             && let Some(data) = self.rcv_buf.pop_first()
         {
+            trace!("servicing queued receive request");
+
             self.pending_rcv
                 .pop_front()
                 .expect("we just checked")
                 .send(Ok(data))
                 .expect("the receiver should block on this call");
         }
+    }
+
+    /// initiates the closing routine
+    pub(super) async fn init_close(&mut self) -> Result<()> {
+        trace!("closing initiated");
+        match self.status {
+            TCPState::Established => {
+                if self.snd_buf.is_empty() {
+                    self.send_fin_ack().await?;
+                    self.change_state(TCPState::FinWait1);
+                } else {
+                    self.tcb.shutdown_init = true;
+                }
+            }
+            TCPState::Listen => {
+                self.change_state(TCPState::Closed);
+            }
+            TCPState::SynReceived => {
+                if self.snd_buf.is_empty() {
+                    self.send_fin().await?;
+                    self.change_state(TCPState::FinWait1);
+                } else {
+                    self.tcb.shutdown_init = true;
+                }
+            }
+
+            TCPState::FinWait1 | TCPState::FinWait2 => {}
+            _ => {}
+        }
+        Ok(())
     }
 }
 

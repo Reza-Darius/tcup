@@ -55,9 +55,8 @@ impl Packet<IP> {
             return Err(UnsupportedProtocol);
         }
 
-        let check = calc_checksum_be(&eth_pay[..hdr_size as usize]);
-        if check != 0 {
-            return Err(ParseError(format!("invalid IP checksum: {check:x}")));
+        if calc_checksum_be(&eth_pay[..hdr_size as usize]) != 0 {
+            return Err(ParseError("invalid IP checksum".into()));
         }
 
         if eth_pay.len() < IP_HDR_MINSIZE as usize {

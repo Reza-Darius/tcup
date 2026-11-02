@@ -22,23 +22,25 @@ async fn main() {
         .unwrap();
 
     let mut socket = tcup.listen(virt_host).await.unwrap();
-    let data = "hello to TCP! Here is some Data! And Some More!";
-    let response = "response from TCUP! Yippie";
+    let data = vec![2; 1460 * 4];
+    let response = vec![1; 1460 * 4];
+    let res_len = response.len();
 
     // give some time for the listening socket to setup
     std::thread::sleep(Duration::from_secs(2));
 
-    let handler = std::thread::spawn(move || {
-        let mut stream = TcpStream::connect(virt_host).unwrap();
+    let mut stream = TcpStream::connect(virt_host).unwrap();
+    stream.write_all(&data).unwrap();
 
-        for slice in data.split_inclusive('!') {
-            stream.write_all(slice.as_bytes()).unwrap();
+    let handler = std::thread::spawn(move || {
+        let mut buf = vec![0; 1460 * 4];
+        let mut snd_bytes = 0;
+
+        while snd_bytes < res_len {
+            snd_bytes += stream.read(&mut buf).unwrap();
         }
 
-        let mut buf = vec![0; 100];
-        let nbyte = stream.read(&mut buf).unwrap();
-
-        assert_eq!(nbyte, response.len());
+        assert_eq!(snd_bytes, res_len);
         println!("sent all bytes");
     });
 
@@ -46,11 +48,15 @@ async fn main() {
     // message boundaries
     std::thread::sleep(Duration::from_secs(2));
 
-    let rcv = socket.recv().await.unwrap();
+    let mut rcv_bytes = 0;
+    while rcv_bytes < data.len() {
+        let rcv = socket.recv().await.unwrap();
+        rcv_bytes += rcv.len();
+    }
 
-    assert_eq!(&rcv, data.as_bytes());
+    assert_eq!(rcv_bytes, data.len());
     println!("got all bytes");
 
-    socket.send(response.as_bytes()).await.unwrap();
+    socket.send(response).await.unwrap();
     handler.join().unwrap();
 }

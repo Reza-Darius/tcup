@@ -127,7 +127,7 @@ impl RecvBuf {
             self.base = seq;
         }
 
-        debug!(seq, ?data, "inserted data");
+        debug!(seq, "inserted data");
 
         match self.data.entry(self.key(seq)) {
             std::collections::btree_map::Entry::Vacant(vacant_entry) => {
