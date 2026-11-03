@@ -12,24 +12,72 @@ name = "cli"
 path = "src/bin/cli.rs"
 
 [dependencies]
+anyhow = "1.0.104"
 bitflags = { version = "2.11.0", features = ["std"] }
-zerocopy = { version = "0.8.0" }
-zerocopy-derive = "0.8.0"
 bytes = "1.11.1"
 derive_more = { version = "2.1.1", features = ["full"] }
 futures = "0.3.32"
 libc = "0.2.183"
+mimalloc = "0.1.52"
+num_enum = "0.7.6"
 parking_lot = "0.12.5"
 pin-project-lite = "0.2.17"
 rtnetlink = "0.23.0"
 rustix = { version = "1.1.4", features = ["fs", "net"] }
 siphasher = "1.0.2"
+slab = "0.4.12"
 test-log = "0.2.19"
 thiserror = "2.0.0"
 tokio = { version = "1.50.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 udev = { version = "0.9.3", features = ["send", "sync"] }
-num_enum = "0.7.6"
-anyhow = "1.0.104"
-slab = "0.4.12"
+zerocopy = { version = "0.8.0" }
+zerocopy-derive = "0.8.0"
+
+# [lints.clippy]
+# cargo = { level = "warn", priority = -1 }
+# complexity = { level = "warn", priority = -1 }
+# correctness = { level = "warn", priority = -1 }
+# pedantic = { level = "warn", priority = -1 }
+# perf = { level = "warn", priority = -1 }
+# style = { level = "warn", priority = -1 }
+# suspicious = { level = "warn", priority = -1 }
+# # nursery = { level = "warn", priority = -1 }  # optional, might cause more false positives
+#
+# # Additional lints are from the `restriction` and `nursery` group that prevent specific
+# # constructs being used in source code in order to drive up consistency,
+# # quality, and brevity
+# allow_attributes_without_reason = "warn"
+# as_pointer_underscore = "warn"
+# assertions_on_result_states = "warn"
+# clone_on_ref_ptr = "warn"
+# deref_by_slicing = "warn"
+# disallowed_script_idents = "warn"
+# empty_drop = "warn"
+# empty_enum_variants_with_brackets = "warn"
+# empty_structs_with_brackets = "warn"
+# fn_to_numeric_cast_any = "warn"
+# if_then_some_else_none = "warn"
+# map_err_ignore = "warn"
+# redundant_type_annotations = "warn"
+# renamed_function_params = "warn"
+# semicolon_outside_block = "warn"
+# too_long_first_doc_paragraph = "warn"
+# undocumented_unsafe_blocks = "warn"
+# unnecessary_safety_comment = "warn"
+# unnecessary_safety_doc = "warn"
+# unneeded_field_pattern = "warn"
+# unused_result_ok = "warn"
+#
+# # May cause issues with structured logging otherwise.
+# literal_string_with_formatting_args = "allow"
+
+[lints.rust]
+ambiguous_negative_literals = "warn"
+missing_debug_implementations = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"

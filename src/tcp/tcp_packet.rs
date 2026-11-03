@@ -2,7 +2,7 @@ use std::default;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use bytes::BufMut;
-use tracing::{trace, warn};
+use tracing::warn;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16, U32};
 
 use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_HDR_SIZE, ETH_PAY_MAX_SIZE};
@@ -170,6 +170,7 @@ impl PseudoHdr {
 }
 
 /// a buffer that can house headers with a TCP payload
+#[derive(Debug)]
 pub struct TCPPayload {
     data: Vec<u8>,
     offset: usize, // the offset of the actual TCP payload, as the buffer retains ETH/IP info
@@ -245,7 +246,6 @@ impl Packet<TCP> {
         ));
 
         let packet = Packet::<IP>::new(sip, dip, packet.into()).unwrap();
-
         debug_assert!(
             packet.len() == ETH_HDR_SIZE + IP_HDR_MINSIZE as usize + packet.payload().len()
         );
@@ -414,6 +414,10 @@ impl Packet<TCP> {
             local_port: tcp_hdr.dport.get(),
         }
     }
+
+    pub fn has_data(&self) -> bool {
+        !self.payload().is_empty()
+    }
 }
 
 fn verify_tcp_checksum(packet: &Packet<IP>) -> bool {
@@ -465,9 +469,7 @@ impl std::fmt::Display for TCPHdr {
 
 impl std::fmt::Display for Packet<TCP> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let ip = self.ip_hdr();
         let tcp = self.hdr();
-        ip.fmt(f)?;
         tcp.fmt(f)
     }
 }

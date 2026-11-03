@@ -9,14 +9,14 @@ pub struct SendBuf {
     data: Vec<u8>,
     /// counter from the left side to track in-flight data
     /// this should correspond to snd_nxt - snd_una
-    count: usize,
+    n_ackd: usize,
 }
 
 impl SendBuf {
     pub fn new(cap: usize) -> Self {
         SendBuf {
             data: Vec::with_capacity(cap),
-            count: 0,
+            n_ackd: 0,
         }
     }
 
@@ -24,7 +24,7 @@ impl SendBuf {
     pub fn insert(&mut self, data: impl AsRef<[u8]>) -> Result<(), TCPError> {
         let d = data.as_ref();
 
-        if d.len() + self.count >= self.data.capacity() {
+        if d.len() + self.n_ackd >= self.data.capacity() {
             return Err(TCPError::BufferError("send buffer overflow".into()));
         }
 
@@ -35,14 +35,14 @@ impl SendBuf {
     /// retrieve N bytes of new data that hasnt been acknowledged yet
     ///
     /// never gives out more than TCP_SEG_MAX_SIZE bytes
-    #[instrument(skip(self), fields(snb_buf_count = self.count))]
-    pub fn get_new_seg(&mut self, req_len: u32) -> Option<&[u8]> {
+    #[instrument(skip(self), fields(snb_buf_count = self.n_ackd))]
+    pub fn get_una_seg(&mut self, req_len: u32) -> Option<&[u8]> {
         let len = usize::min(req_len as usize, TCP_SEG_MAX_SIZE);
-        if len == 0 || self.count == self.data.len() {
+        if len == 0 || self.n_ackd == self.data.len() {
             return None;
         }
 
-        let lo = self.count;
+        let lo = self.n_ackd;
         let hi = usize::min(lo + req_len as usize, self.data.len());
 
         let out_slice = &self.data[lo..hi];
@@ -51,29 +51,17 @@ impl SendBuf {
         Some(out_slice)
     }
 
-    /// retreives data until cursor
-    ///
-    /// never gives out more than TCP_SEG_MAX_SIZE bytes
-    pub fn get_last_seg(&self) -> Option<&[u8]> {
-        if self.data.is_empty() {
-            return None;
-        }
-
-        let hi = usize::min(self.count, TCP_SEG_MAX_SIZE);
-        Some(&self.data[0..hi])
-    }
-
-    /// mark len bytes as ACKd, moving up the cursor
+    /// mark len bytes as ACKd, moving up the internal cursor
     pub fn free(&mut self, ackd_bytes: usize) {
         trace!(ackd_bytes, "freeing send buffer");
 
         assert!(ackd_bytes <= self.data.len());
-        self.count += ackd_bytes;
+        self.n_ackd += ackd_bytes;
 
         // all outstanding data has been ACKd, we can reset the buffer
-        if self.count == self.data.len() {
+        if self.n_ackd == self.data.len() {
             self.clear();
-            self.count = 0;
+            self.n_ackd = 0;
         }
     }
 
@@ -82,9 +70,9 @@ impl SendBuf {
     }
 
     pub fn clear(&mut self) {
-        if self.count == self.data.len() {
+        if self.n_ackd == self.data.len() {
             self.data.clear();
-            self.count = 0;
+            self.n_ackd = 0;
         }
     }
 }

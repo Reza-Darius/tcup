@@ -7,9 +7,7 @@ use crate::{
         transport::{TCPServiceV1, TransportService},
     },
     tap::device::TAPDeviceOptions,
-    tcp::{
-        socket::{SocketServiceCall, SocketUserHandle},
-    },
+    tcp::socket::{SocketServiceCall, SocketUserHandle},
     utils::packet::{ETH, IP, Packet},
 };
 use anyhow::Result;
@@ -32,15 +30,28 @@ pub async fn init(
 }
 
 /// A handle to a running TCup server used to request transport services
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TCup {
     sender: Sender<SocketServiceCall>,
 }
 
 impl TCup {
     /// connect to the designated address over TCP
-    pub async fn connect(&self) -> Result<SocketUserHandle> {
-        todo!()
+    pub async fn connect(
+        &self,
+        local_addr: Ipv4Addr,
+        remote_addr: SocketAddrV4,
+    ) -> Result<SocketUserHandle> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(SocketServiceCall::Connect {
+                local_addr,
+                remote_addr,
+                resp: tx,
+            })
+            .await?;
+
+        rx.await?.map_err(Into::into)
     }
 
     /// create a listening socket over TCP

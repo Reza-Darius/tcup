@@ -12,3 +12,4 @@ mod timer;
 
 pub use error::TCPError;
 pub use skcb::TCPState;
+pub use timer::TCPTimerServiceHandle;

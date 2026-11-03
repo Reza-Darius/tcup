@@ -8,7 +8,7 @@ use tokio::sync::{
     mpsc::{Receiver, Sender, channel},
     oneshot,
 };
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::tcp::heap::MinHeap;
 
@@ -42,12 +42,15 @@ impl PartialOrd for Timer {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, PartialOrd, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Hash)]
 pub enum TimerKind {
     RTO,
+    SynSent,
+    FinSent,
+    TimeWait,
 }
 
-const N_TIMER: usize = 1;
+const N_TIMER: usize = 3;
 
 struct SocketEntry {
     sender: Sender<TimerKind>,
@@ -70,23 +73,9 @@ struct TCPTimer {
 }
 
 impl TCPTimer {
-    pub fn init() -> Sender<TCPTimerMessage> {
-        let (tx, rx) = channel(SOCKET_CHAN_BUF_SIZE);
-        let tx_cl = tx.clone();
-
-        let timer = TCPTimer {
-            sockets: Slab::new(),
-            timer: HashMap::new(),
-            deadlines: MinHeap::new(TIMER_HEAP_MAX_SIZE),
-            rcv: rx,
-            snd: tx_cl,
-        };
-
-        tokio::spawn(async move { timer.run().await });
-        tx
-    }
-
     async fn run(mut self) {
+        debug!("starting TCP timer service");
+
         let mut int = tokio::time::interval(Duration::from_millis(CLOCK_GRANULARITY));
         int.tick().await;
         loop {
@@ -127,6 +116,7 @@ impl TCPTimer {
                     socket_key,
                     kind,
                 });
+                trace!(socket_key, ?kind, "set timer");
             }
             TCPTimerMessage::RemoveTimer { socket_key, kind } => {
                 // we just bump up the generation count
@@ -155,15 +145,15 @@ impl TCPTimer {
         self.timer.retain(|(key, _), _| socket_key != *key);
     }
 
-    fn register_socket(&mut self) -> TCPTimerCBHandler {
+    fn register_socket(&mut self) -> TCPTimerCBHandle {
         let (tx, rx) = channel(SOCKET_CHAN_BUF_SIZE);
         let key = self.sockets.insert(SocketEntry {
             sender: tx,
             generations: [0; _],
         });
 
-        TCPTimerCBHandler {
-            sender: TCPTimerHandler {
+        TCPTimerCBHandle {
+            sender: TCPTimerServiceHandle {
                 sender: self.snd.clone(),
             },
             receiver: rx,
@@ -172,43 +162,106 @@ impl TCPTimer {
     }
 
     async fn handle_tick(&mut self) {
+        let Some(first) = self.deadlines.peek().copied() else {
+            return;
+        };
         let now = Instant::now();
-        if let Some(first) = self.deadlines.peek().copied() {
-            // is the time up?
-            if first.deadline > now {
-                return;
-            }
 
+        // is the time up?
+        if first.deadline > now {
+            return;
+        }
 
-            // is the entry stale?
-            let reg_gen = self.timer[&(first.socket_key, first.kind)].generation;
-            let socket_entry = &self.sockets[first.socket_key];
-            if socket_entry.generations[first.kind as usize] > reg_gen {
-                return;
-            }
+        self.deadlines.pop();
 
-            // TODO: on error, remove the socket
-            socket_entry.sender.send(first.kind).await;
-            self.deadlines.pop();
+        // is the entry stale?
+        let reg_gen = self.timer[&(first.socket_key, first.kind)].generation;
+        let Some(socket_entry) = self.sockets.get(first.socket_key) else {
+            // timer for non existing socket found
+            return;
+        };
+        if socket_entry.generations[first.kind as usize] > reg_gen {
+            return;
+        }
+
+        if let Err(e) = socket_entry.sender.send(first.kind).await {
+            debug!("couldnt send timer notif to socket");
+            self.sockets.remove(first.socket_key);
         }
     }
 }
 
 /// handle for transport service
-#[derive(Clone)]
-pub struct TCPTimerHandler {
+#[derive(Debug, Clone)]
+pub struct TCPTimerServiceHandle {
     sender: Sender<TCPTimerMessage>,
 }
 
-impl TCPTimerHandler {
-    pub fn register_socket(&self) {}
+impl TCPTimerServiceHandle {
+    /// starts the timer service worker
+    #[must_use]
+    pub fn init() -> Self {
+        let (tx, rx) = channel(SOCKET_CHAN_BUF_SIZE);
+        let tx_cl = tx.clone();
+
+        let timer = TCPTimer {
+            sockets: Slab::new(),
+            timer: HashMap::new(),
+            deadlines: MinHeap::new(TIMER_HEAP_MAX_SIZE),
+            rcv: rx,
+            snd: tx_cl,
+        };
+
+        tokio::spawn(async move { timer.run().await });
+        TCPTimerServiceHandle { sender: tx }
+    }
+
+    pub async fn register_socket(&self) -> TCPTimerCBHandle {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(TCPTimerMessage::RegisterSocket { resp: tx })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
 }
 
 /// handle for individual TCP worker
-pub struct TCPTimerCBHandler {
-    sender: TCPTimerHandler,
+#[derive(Debug)]
+pub struct TCPTimerCBHandle {
+    sender: TCPTimerServiceHandle,
     receiver: Receiver<TimerKind>,
     socket_key: usize,
+}
+
+impl TCPTimerCBHandle {
+    pub async fn recv(&mut self) -> TimerKind {
+        self.receiver
+            .recv()
+            .await
+            .expect("the receiver cant be closed")
+    }
+
+    pub async fn set_timer(&self, kind: TimerKind, deadline: Instant) {
+        self.sender
+            .sender
+            .send(TCPTimerMessage::SetTimer {
+                socket_key: self.socket_key,
+                kind,
+                deadline,
+            })
+            .await;
+    }
+    pub async fn remove_timer(&self, kind: TimerKind) {
+        self.sender
+            .sender
+            .send(TCPTimerMessage::RemoveTimer {
+                socket_key: self.socket_key,
+                kind,
+            })
+            .await;
+    }
 }
 
 pub enum TCPTimerMessage {
@@ -222,7 +275,7 @@ pub enum TCPTimerMessage {
         kind: TimerKind,
     },
     RegisterSocket {
-        resp: oneshot::Sender<TCPTimerCBHandler>,
+        resp: oneshot::Sender<TCPTimerCBHandle>,
     },
     RemoveSocket {
         socket_key: usize,

@@ -5,6 +5,11 @@ use std::{
     time::Duration,
 };
 
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();

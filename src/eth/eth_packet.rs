@@ -2,7 +2,7 @@ use num_enum::TryFromPrimitive;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
 use super::mac::*;
-use crate::eth::EthErr::{UnsupportedProtocol, ParseError};
+use crate::eth::EthErr::{ParseError, UnsupportedProtocol};
 use crate::eth::error::EthErr;
 use crate::utils::packet::*;
 

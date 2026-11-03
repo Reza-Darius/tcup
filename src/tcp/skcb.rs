@@ -7,14 +7,15 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tracing::{debug, error, instrument, trace};
 
-use super::socket::TCPCon;
 use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::server::services::arp_svc::ARPServiceHandle;
-use crate::tcp::TCPError::ChannelError;
+use crate::tcp::TCPError::{ChannelError, SKCBError};
+use crate::tcp::TCPState::{Closing, LastAck};
 use crate::tcp::buffer::{RecvBuf, SendBuf};
 use crate::tcp::error::TCPError::{self};
 use crate::tcp::handler::{TCP_HDR_MINSIZE, seg_handler};
 use crate::tcp::tcp_packet::{TCP_HDR_OFFSET, TCP_SEG_MAX_SIZE, TCPPayload};
+use crate::tcp::timer::{TCPTimerCBHandle, TimerKind};
 use crate::tcp::{
     opts::TCPOpts,
     rto::RTO,
@@ -31,6 +32,7 @@ pub const CHAN_BUF_SIZE: usize = ETH_FRAME_MAX_SIZE * 100;
 pub const SYN_ACK_RETRIES: u64 = 5;
 
 pub const SND_RCV_BUF_SIZE: u16 = 10000;
+pub const SND_MAX_TRIES: u8 = 5;
 
 type Result<T> = std::result::Result<T, TCPError>;
 
@@ -75,6 +77,8 @@ pub struct SKCBInner {
 
     /// pending RECEIVE user calls
     pub pending_rcv: VecDeque<oneshot::Sender<Result<Vec<u8>>>>,
+
+    pub timer_chan: TCPTimerCBHandle,
 }
 
 #[derive(Debug)]
@@ -122,11 +126,24 @@ pub struct TCB {
     pub snd_opts: TCPOpts,
     pub rcv_opts: TCPOpts,
 
-    pub last_snd: Option<Instant>,
-    pub last_rcv: Option<Instant>,
+    /// remembers the last segment to take measurements against
+    pub rtt_probe: Option<SentSegment>,
     pub rto: RTO,
+    pub rto_set: bool,
 
     pub shutdown_init: bool,
+    /// how many times did we try to send a syn
+    pub syn_retries: u8,
+    /// how many times we tried to send the last data segment
+    pub data_retries: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SentSegment {
+    pub seq_start: u32,
+    pub seq_end: u32,
+    pub sent: Instant,
+    pub retransmission: bool,
 }
 
 // https://datatracker.ietf.org/doc/html/rfc9293#name-state-machine-overview
@@ -148,7 +165,12 @@ pub enum TCPState {
 }
 
 impl SKCB {
-    pub(super) fn new(rx: Receiver<SKCBMessage>, tx: ARPServiceHandle, addr: SocketAddrV4) -> Self {
+    pub(super) fn new(
+        rx: Receiver<SKCBMessage>,
+        tx: ARPServiceHandle,
+        addr: SocketAddrV4,
+        timer_tx: TCPTimerCBHandle,
+    ) -> Self {
         let mut skcb = SKCB {
             inner: Box::new(SKCBInner {
                 tcb: TCB::default(),
@@ -165,6 +187,7 @@ impl SKCB {
                 r_addr: None,
 
                 pending_rcv: VecDeque::new(),
+                timer_chan: timer_tx,
             }),
         };
 
@@ -189,14 +212,16 @@ impl SKCB {
             // this select is biased as to not cause a race between an incoming packet
             // changing a packet then reacting to a fired timer
             tokio::select! {biased;
-                _ = &mut self.inner.tcb.rto => {
-                    // self.inner.tcb.rto.clear();
-                    trace!("RTO expired");
+                timer = self.inner.timer_chan.recv() => {
+                    trace!("timer fired");
+
+                    if let Err(e) = self.handle_timer(timer).await {
+                        error!(%e);
+                    };
                 }
                 res = self.inner.in_chan.recv() => {
                     let Some(msg) = res else {
                         self.init_close().await?;
-                        debug!("receive channel closed, closing socket");
                         break;
                     };
                     if let Err(e) = self.handle_user_call(msg).await {
@@ -207,6 +232,26 @@ impl SKCB {
         }
 
         debug!("closing socket");
+        Ok(())
+    }
+
+    #[instrument(name = "TCP", skip_all, fields(state = ?self.status, timer))]
+    async fn handle_timer(&mut self, timer: TimerKind) -> Result<()> {
+        match timer {
+            TimerKind::RTO => {
+                trace!("RTO fired");
+
+                // - retransmit segment
+                self.retransmit().await?;
+
+                // - start new RTO with backoff
+                self.tcb.rto.backoff();
+                self.start_rto().await;
+            }
+            TimerKind::SynSent => todo!(),
+            TimerKind::FinSent => todo!(),
+            TimerKind::TimeWait => todo!(),
+        }
         Ok(())
     }
 
@@ -345,7 +390,7 @@ impl SKCB {
             TCP_SEG_MAX_SIZE as u32 - opt_len as u32,
         );
 
-        let data = self.snd_buf.get_new_seg(n_send_bytes)?;
+        let data = self.snd_buf.get_una_seg(n_send_bytes)?;
         let offset = TCP_HDR_OFFSET + TCP_HDR_MINSIZE + opt_len;
         let data_len = data.len() as u32;
 
@@ -358,32 +403,151 @@ impl SKCB {
         Some(TCPPayload::from_vec(v, offset))
     }
 
-    /// updates the control block
+    /// updates the control block with a new segment
     fn update_tcb(&mut self, seg: &Packet<TCP>) {
         let ip_hdr = seg.ip_hdr();
         let tcp_hdr = *seg.hdr();
-
-        // populate control block
 
         let tcb = &mut self.inner.tcb;
         tcb.seg_seq = tcp_hdr.seq.get();
         tcb.seg_ack = tcp_hdr.ack.get();
         tcb.seg_wnd = tcp_hdr.win_size.get();
-
         tcb.seg_len = ip_hdr.tot_len() as u32 - ip_hdr.len() as u32 - tcp_hdr.len() as u32;
+    }
+
+    /// starts the RTO timer
+    pub(super) async fn start_rto(&mut self) {
+        self.tcb.rto_set = true;
+        let deadline = self.tcb.rto.deadline();
+
+        trace!(rto = ?self.tcb.rto.rto(), "setting RTO");
+        self.timer_chan.set_timer(TimerKind::RTO, deadline).await;
+    }
+
+    /// updates the RTO with a RTT measruement, must only be called for a non retransmission
+    pub(super) fn update_rto(&mut self, sent: Instant) {
+        self.tcb.rto.update(sent, Instant::now());
+    }
+
+    /// disables the RTO timer
+    pub(super) async fn stop_rto(&mut self) {
+        self.tcb.rto_set = false;
+        self.timer_chan.remove_timer(TimerKind::RTO).await;
+    }
+
+    pub(super) async fn retransmit(&mut self) -> Result<()> {
+        let mut hdr = self.hdr_t();
+        let con = self.con();
+
+        // get a payload
+        let mut seg_len = self.tcb.snd_nxt.wrapping_sub(self.tcb.snd_una);
+
+        match self.status {
+            TCPState::SynSent => {
+                hdr.set_syn();
+                seg_len -= 1;
+            }
+            TCPState::SynReceived => {
+                hdr.set_syn();
+                hdr.set_ack();
+                seg_len -= 1;
+            }
+            TCPState::FinWait1 | Closing | LastAck => {
+                hdr.set_fin();
+                hdr.set_ack();
+                seg_len -= 1;
+            }
+            TCPState::Listen | TCPState::Closed => {
+                return Err(SKCBError("retransmit called in LISTEN state".into()));
+            }
+            _ => {}
+        }
+
+        hdr.seq = self.tcb.snd_una.into();
+
+        let offset = TCP_HDR_OFFSET + TCP_HDR_MINSIZE;
+        let payload = self
+            .snd_buf
+            .get_una_seg(seg_len)
+            .map(|bytes| TCPPayload::from_vec(bytes.into(), offset));
+
+        // bookkeeping for RTO
+        let seq_start = hdr.seq.get();
+        let seq_end = seq_start.wrapping_add(
+            payload.as_ref().map(|payload| payload.len()).unwrap_or(0) as u32
+                + u32::from(hdr.is_syn())
+                + u32::from(hdr.is_fin()),
+        );
+
+        self.inner.tcb.rtt_probe = Some(SentSegment {
+            seq_start,
+            seq_end,
+            sent: Instant::now(),
+            retransmission: true,
+        });
+
+        let packet = Packet::<TCP>::new(
+            con.local_ip,
+            con.remote_ip,
+            hdr,
+            TCPOpts::default(),
+            payload,
+        );
+
+        debug!(%hdr, "retransmitting packet"); // this prints incomplete information about the header but thats fine
+        self.out_chan.send(packet.into()).await;
+        Ok(())
     }
 
     /// sends a packet out through the open connection
     pub(super) async fn output(
         &mut self,
-        tcp_hdr: TCPHdr,
+        mut hdr: TCPHdr,
         opts: TCPOpts,
-        tcp_pay: Option<TCPPayload>,
+        payload: Option<TCPPayload>,
     ) -> Result<()> {
         let con = self.con();
-        let packet = Packet::<TCP>::new(con.local_ip, con.remote_ip, tcp_hdr, opts, tcp_pay);
 
-        debug!(%tcp_hdr, "sending packet out"); // this prints incomplete information about the header but thats fine
+        if matches!(self.status, TCPState::Established | TCPState::CloseWait)
+            && self.tcb.shutdown_init
+            && self.snd_buf.is_empty()
+        {
+            if matches!(self.status, TCPState::Established) {
+                self.change_state(TCPState::FinWait1);
+            }
+            if matches!(self.status, TCPState::CloseWait) {
+                self.change_state(TCPState::LastAck);
+            }
+
+            hdr.set_fin();
+            self.tcb.snd_nxt = self.tcb.snd_nxt.wrapping_add(1);
+            self.tcb.shutdown_init = false;
+        }
+
+        // prepare a new RTT probe for RTO
+        if self.inner.tcb.rtt_probe.is_none() {
+            let seq_start = hdr.seq.get();
+            let seq_end = seq_start.wrapping_add(
+                payload.as_ref().map(|payload| payload.len()).unwrap_or(0) as u32
+                    + u32::from(hdr.is_syn())
+                    + u32::from(hdr.is_fin()),
+            );
+            self.inner.tcb.rtt_probe = Some(SentSegment {
+                seq_start,
+                seq_end,
+                sent: Instant::now(),
+                retransmission: false,
+            });
+        }
+
+        // make sure we dont overrwite an running rto
+        if !self.tcb.rto_set && (payload.is_some() || hdr.is_fin() || hdr.is_syn()) {
+            self.start_rto().await;
+        }
+
+        let packet = Packet::<TCP>::new(con.local_ip, con.remote_ip, hdr, opts, payload);
+
+        debug!(%hdr, "sending packet out"); // this prints incomplete information about the header but thats fine
         self.out_chan.send(packet.into()).await;
         Ok(())
     }
@@ -505,17 +669,6 @@ impl SKCB {
         }
     }
 
-    // fn retransmit(&mut self) -> Result<()> {
-    //     // pop seg from queue
-    //     // call send()
-    //     // dont take measurement
-    //     Ok(())
-    // }
-
-    pub fn clear_rto(&mut self) {
-        // TODO: impl
-    }
-
     #[inline(always)]
     pub(super) fn change_state(&mut self, to: TCPState) {
         #[cfg(debug_assertions)]
@@ -544,6 +697,7 @@ impl SKCB {
 
     /// initiates the closing routine
     pub(super) async fn init_close(&mut self) -> Result<()> {
+        debug_assert!(!self.tcb.shutdown_init);
         trace!("closing initiated");
         match self.status {
             TCPState::Established => {

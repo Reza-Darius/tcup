@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::sync::{mpsc::Sender, oneshot};
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::{
     server::services::arp_svc::ARPServiceHandle,
@@ -11,6 +11,7 @@ use crate::{
         opts::TCPOpts,
         skcb::{Open, SKCB, TCPState},
         tcp_packet::{TCPFlags, TCPHdr},
+        timer::TCPTimerCBHandle,
     },
     utils::packet::{IP, Packet, TCP},
 };
@@ -82,6 +83,10 @@ impl SocketUserHandle {
             .map_err(|_| ChannelError)?;
         rx.await.map_err(|_| ChannelError).flatten()
     }
+
+    pub fn key(&self) -> usize {
+        self.socket_key
+    }
 }
 
 /// a handle to a socket for the transport service
@@ -93,9 +98,14 @@ pub struct SocketInternalHandle {
 
 impl SocketInternalHandle {
     /// creates a new listening socket
-    pub fn listen(ip_tx: ARPServiceHandle, addr: SocketAddrV4, chan_size: usize) -> Self {
+    pub fn listen(
+        ip_tx: ARPServiceHandle,
+        local_addr: SocketAddrV4,
+        chan_size: usize,
+        timer_tx: TCPTimerCBHandle,
+    ) -> Self {
         let (s_tx, s_rx) = tokio::sync::mpsc::channel(chan_size);
-        let mut skcb = SKCB::new(s_rx, ip_tx, addr);
+        let mut skcb = SKCB::new(s_rx, ip_tx, local_addr, timer_tx);
 
         let handle = tokio::spawn(async move {
             skcb.status = TCPState::Listen;
@@ -119,15 +129,16 @@ impl SocketInternalHandle {
     /// creates a new connection socket
     pub fn connect(
         ip_tx: ARPServiceHandle,
-        s_addr: SocketAddrV4,
-        r_addr: SocketAddrV4,
+        local_address: SocketAddrV4,
+        remote_address: SocketAddrV4,
         chan_size: usize,
+        timer_tx: TCPTimerCBHandle,
     ) -> Self {
         let (s_tx, s_rx) = tokio::sync::mpsc::channel(chan_size);
-        let mut skcb = SKCB::new(s_rx, ip_tx, s_addr);
+        let mut skcb = SKCB::new(s_rx, ip_tx, local_address, timer_tx);
 
         let handle = tokio::spawn(async move {
-            active_open(&mut skcb, r_addr).await.unwrap();
+            active_open(&mut skcb, remote_address).await.unwrap();
             skcb.run().await.unwrap();
         });
 
@@ -141,7 +152,6 @@ impl SocketInternalHandle {
         self.sender
             .send(message)
             .await
-            .inspect_err(|e| error!(%e, "error when calling socket"))
             .map_err(|e| SocketError(format!("error when calling socket: {e}")))
     }
 
@@ -152,6 +162,7 @@ impl SocketInternalHandle {
 
     pub async fn close(self) {
         if self.sender.send(SKCBMessage::Close).await.is_err() {
+            warn!("couldnt send close message, aborting socket handle");
             self.worker_handle.abort();
         };
     }
@@ -198,10 +209,12 @@ impl TCPCon {
 }
 
 /// calls for the service worker, like allocating new sockets
-/// 
+///
 /// data transfer between user and socket is handled by SKCBMessages below
+#[derive(Debug)]
 pub enum SocketServiceCall {
     Connect {
+        local_addr: Ipv4Addr,
         remote_addr: SocketAddrV4,
         resp: oneshot::Sender<Result<SocketUserHandle, TCPError>>,
     },

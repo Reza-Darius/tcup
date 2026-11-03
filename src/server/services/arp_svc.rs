@@ -34,7 +34,7 @@ impl ARPTable for ARPStore {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ARPServiceHandle {
     sender: Sender<ARPServiceMessage>,
 }
@@ -63,7 +63,7 @@ impl From<Packet<IP>> for ARPServiceMessage {
     }
 }
 
-// TODO: 
+// TODO:
 // - retry pending arp requests
 // - deal with stale entries
 #[derive(Debug)]

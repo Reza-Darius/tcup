@@ -64,8 +64,6 @@ pub async fn seg_handler(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
 /// determines whether the segment should be dropped and possible state change
 async fn handle_sync_rst(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
-    trace!("chcking rst in sync state");
-
     if !hdr.is_rst() {
         return false;
     }
@@ -82,13 +80,12 @@ async fn handle_sync_rst(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
     } else {
         skcb.change_state(TCPState::Closed);
     }
+    trace!("dropping packet: rst");
     true
 }
 
 /// returns true if the segment should be dropped
 async fn handle_sync_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
-    trace!("chcking syn in sync state");
-
     if !hdr.is_syn() {
         return false;
     }
@@ -103,6 +100,7 @@ async fn handle_sync_syn(skcb: &mut SKCB, hdr: &TCPHdr) -> bool {
         }
     } else {
         // challenge ACK
+        trace!("dropping packet with chall acck: syn");
         skcb.send_ack().await.unwrap();
         true
     }
@@ -511,14 +509,29 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
             }
 
             skcb.snd_buf.free(acked);
+            skcb.tcb.snd_una = seg_ack;
 
             // - If the received segment acknowledges all outstanding data (snd_una equals snd_max), the
             //   retransmission timer is turned off. Otherwise, if the persist timer is off, the retransmit timer is restarted
-            if skcb.snd_buf.is_empty() {
-                skcb.clear_rto();
-            }
+            if skcb.tcb.snd_una == skcb.tcb.snd_nxt {
+                trace!("all outstanding data ACKd, stopping RTO");
+                skcb.stop_rto().await;
+                skcb.tcb.rtt_probe = None;
+            } else {
+                // if we got an ack for outgoing data that wasnt a retransmission we can take a RTT
+                // measurment
+                if let Some(seg) = skcb.tcb.rtt_probe
+                    && !seg.retransmission
+                    && seq_gt(seg_ack, seg.seq_start)
+                {
+                    skcb.update_rto(seg.sent);
 
-            skcb.tcb.snd_una = seg_ack;
+                    // don't sample this transmission again.
+                    skcb.tcb.rtt_probe = None;
+                }
+                // section 5.3, restart RTO for an ACK that acknowledges new data
+                skcb.start_rto().await;
+            }
 
             // TODO::
             // - if the buffer has been fully acknowledged, return OK response to user

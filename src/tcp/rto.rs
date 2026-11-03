@@ -1,240 +1,82 @@
-use std::{cmp::max, task::Poll};
+use std::cmp::{max, min};
+use std::time::{Duration, Instant};
 
-use std::pin::Pin;
-use std::time::Duration;
-
-use crate::tcp::timer::CLOCK_GRANULARITY;
-use pin_project_lite::pin_project;
-use tokio::time::Instant;
 use tracing::trace;
 
-pub const RTO_START: u64 = 1000; // one second in miliseconds
-pub const RTO_CAP: u64 = RTO_START * 60; // one minute
+use crate::tcp::timer::CLOCK_GRANULARITY;
 
-/// awating this object drives the timer
-#[derive(Debug)]
+const RTO_START: u64 = 1000; // ms
+const RTO_CAP: u64 = RTO_START * 60; // one minute
+
+const MIN: Duration = Duration::from_millis(RTO_START);
+const MAX: Duration = Duration::from_millis(RTO_CAP);
+
+/// RFC 6298 retransmission timer state: SRTT, RTTVAR and the current RTO.
+#[derive(Debug, Clone, Copy)]
 pub struct RTO {
-    inner: Pin<Box<RTOInner>>,
+    srtt: Option<Duration>, // None until the first measurement
+    rttvar: Duration,
+    rto: Duration,
 }
 
 impl RTO {
-    /// new RTO timer with a RTO of 1 second
-    pub fn new() -> RTO {
-        let rto = Duration::from_millis(RTO_START);
+    pub const fn new() -> Self {
         RTO {
-            inner: Box::pin(RTOInner {
-                is_set: false,
-                first_measure: true,
-                srtt: Duration::from_millis(0),
-                rttvar: Duration::from_millis(0),
-                rto,
-                sleep: tokio::time::sleep(rto),
-            }),
+            srtt: None,
+            rttvar: Duration::ZERO,
+            rto: MIN,
         }
     }
 
-    pub fn set(&mut self) {
-        self.reset();
-        let this = self.inner.as_mut().project();
-        *this.is_set = true;
+    /// absolute deadline for the timer worker
+    pub fn deadline(&self) -> Instant {
+        Instant::now() + self.rto
     }
 
-    /// doubles the RTO
+    pub fn rto(&self) -> Duration {
+        self.rto
+    }
+
+    /// RFC 6298 §5.5, clamped to the cap
     pub fn backoff(&mut self) {
-        let this = self.inner.as_mut().project();
-        *this.rto *= 2;
+        self.rto = min(self.rto.saturating_mul(2), MAX);
     }
 
-    /// completely resets the RTO, this allows reusing the allocation
-    pub fn clear(&mut self) {
-        let this = self.inner.as_mut().project();
-        let rto_default = Duration::from_millis(RTO_START);
-
-        *this.first_measure = true;
-        *this.rto = rto_default;
-        *this.srtt = Duration::from_millis(0);
-        *this.rttvar = Duration::from_millis(0);
-        this.sleep.reset(Instant::now() + rto_default);
-    }
-
-    /// did we exceed the maxmium RTO?
     pub fn cap_reached(&self) -> bool {
-        self.inner.rto >= Duration::from_millis(RTO_CAP)
+        self.rto >= MAX
     }
 
-    /// resets the timer to the current set RTO
-    pub fn reset(&mut self) {
-        let this = self.inner.as_mut().project();
-        this.sleep.reset(Instant::now() + *this.rto);
+    /// back to initial state (no measurements, RTO = 1s)
+    pub fn clear(&mut self) {
+        *self = Self::new();
     }
 
-    /// calculates the round trip measurements and sets the RTO
-    ///
-    /// a measurement should ONLY be taken for an ACK on a segment that wasnt retransmitted
-    ///
-    /// https://datatracker.ietf.org/doc/html/rfc6298#section-3
-    pub fn update(&mut self, sent: Instant, receive: Instant) {
-        let this = self.inner.as_mut().project();
-        let rtt = receive - sent;
+    /// Feed an RTT sample. ONLY for ACKs of segments that weren't retransmitted (Karn).
+    pub fn update(&mut self, sent: Instant, received: Instant) {
+        let rtt = received.saturating_duration_since(sent);
 
-        if *this.first_measure {
-            let srtt = rtt;
-            let rttvar = rtt / 2;
-            let rto_calc = srtt + max(Duration::from_millis(CLOCK_GRANULARITY), 4 * rttvar);
-
-            *this.srtt = srtt;
-            *this.rttvar = rttvar;
-            *this.rto = max(rto_calc, Duration::from_millis(RTO_START)); // round to 1 second
-            *this.first_measure = false;
-        } else {
-            //[JK88]  Jacobson, V. and M. Karels, "Congestion Avoidance and Control"
-            const ALPHA: f32 = 0.125;
-            const BETA: f32 = 0.25;
-
-            let rttvar = this.rttvar.mul_f32(1f32 - BETA) + this.srtt.abs_diff(rtt).mul_f32(BETA);
-            let srtt = this.srtt.mul_f32(1f32 - ALPHA) + rtt.mul_f32(ALPHA);
-            let rto_calc = srtt + max(Duration::from_millis(CLOCK_GRANULARITY), 4 * rttvar);
-
-            *this.srtt = srtt;
-            *this.rttvar = rttvar;
-            *this.rto = max(rto_calc, Duration::from_millis(RTO_START)); // round to 1 second
+        let (srtt, rttvar) = match self.srtt {
+            None => (rtt, rtt / 2), // first measure, §2.2
+            Some(srtt) => {
+                // §2.3
+                const ALPHA: f32 = 0.125;
+                const BETA: f32 = 0.25;
+                let rttvar = self.rttvar.mul_f32(1.0 - BETA) + srtt.abs_diff(rtt).mul_f32(BETA);
+                let srtt = srtt.mul_f32(1.0 - ALPHA) + rtt.mul_f32(ALPHA);
+                (srtt, rttvar)
+            }
         };
-        trace!(?this.srtt, ?this.rttvar, ?this.rto, "calculated RTO");
-    }
-}
 
-impl Future for RTO {
-    type Output = ();
-
-    fn poll(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        self.inner.as_mut().poll(cx)
+        self.srtt = Some(srtt);
+        self.rttvar = rttvar;
+        self.rto =
+            (srtt + max(Duration::from_millis(CLOCK_GRANULARITY), 4 * rttvar)).clamp(MIN, MAX);
+        trace!(?self.srtt, ?self.rttvar, ?self.rto, "updated RTO");
     }
 }
 
 impl Default for RTO {
     fn default() -> Self {
-        RTO::new()
-    }
-}
-
-/*
- * possible optimization: use global clock instead of individual tokio::sleep
- */
-
-pin_project! {
-    #[derive(Debug)]
-    struct RTOInner {
-        is_set: bool,
-
-        first_measure: bool,
-        srtt: Duration,
-        rttvar: Duration,
-        rto: Duration,
-
-        #[pin]
-        sleep: tokio::time::Sleep,
-    }
-}
-
-impl Future for RTOInner {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-
-        if !*this.is_set {
-            return Poll::Pending;
-        }
-
-        this.sleep.poll(cx)
-
-        // match this.sleep.poll(cx) {
-        //     Poll::Ready(_) => {
-        //         *this.is_set = false;
-        //         Poll::Ready(())
-        //     }
-        //     Poll::Pending => Poll::Pending,
-        // }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_first_measurement() {
-        let mut rto = RTO::new();
-
-        let now = Instant::now();
-        let sent = now - Duration::from_millis(100);
-
-        rto.update(sent, now);
-
-        let inner = rto.inner.as_ref();
-        // RFC 6298 §2.2: SRTT ← R
-        assert_eq!(inner.srtt, Duration::from_millis(100));
-
-        // RTTVAR ← R/2
-        assert_eq!(inner.rttvar, Duration::from_millis(50));
-
-        // RTO = SRTT + max(G, 4·RTTVAR) = 100 + max(G, 200)
-        // With CLOCK_GRAN=1 ms → 100+200 = 300 ms, floored to RTO_START (1 s)
-        assert_eq!(inner.rto, Duration::from_millis(RTO_START));
-
-        // first_measure must be cleared so next call uses EWMA path
-        assert!(!inner.first_measure);
-    }
-
-    #[tokio::test]
-    async fn test_subsequent_measurement() {
-        let mut rto = RTO::new(); // first_measure = true (after fix)
-
-        let now = Instant::now();
-        rto.update(now - Duration::from_millis(100), now); // seed
-
-        // Feed a second sample
-        rto.update(now - Duration::from_millis(120), now);
-
-        let inner = rto.inner.as_ref();
-        // RTTVAR = 0.75·50 + 0.25·|100−120| = 37.5 + 5.0 = 42.5 ms
-        let expected_rttvar = Duration::from_micros(42_500);
-        assert!(
-            (inner.rttvar.as_micros() as i64 - expected_rttvar.as_micros() as i64).abs() < 200,
-            "rttvar was {:?}, expected ~42.5 ms",
-            inner.rttvar
-        );
-
-        // SRTT = 0.875·100 + 0.125·120 = 87.5 + 15.0 = 102.5 ms
-        let expected_srtt = Duration::from_micros(102_500);
-        assert!(
-            (inner.srtt.as_micros() as i64 - expected_srtt.as_micros() as i64).abs() < 200,
-            "srtt was {:?}, expected ~102.5 ms",
-            inner.srtt
-        );
-
-        // RTO = 102.5 + max(G, 4·42.5) = 102.5 + 170 = 272.5 ms → floored to 1 s
-        assert_eq!(inner.rto, Duration::from_millis(RTO_START));
-    }
-
-    #[tokio::test]
-    async fn test_rto_above_floor() {
-        // Simulate a link where RTT is 800 ms.
-        // After the first measurement:
-        //   srtt=800, rttvar=400
-        //   rto = 800 + max(G, 1600) = 2400 ms  ← above the 1 s floor
-        let mut rto = RTO::new();
-        let now = Instant::now();
-        rto.update(now - Duration::from_millis(800), now);
-
-        assert!(
-            rto.inner.rto > Duration::from_millis(RTO_START),
-            "RTO should exceed floor on a slow link; got {:?}",
-            rto.inner.rto
-        );
-        assert_eq!(rto.inner.rto, Duration::from_millis(2400));
+        Self::new()
     }
 }

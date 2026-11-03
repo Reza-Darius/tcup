@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
-    net::SocketAddrV4,
+    net::{Ipv4Addr, SocketAddrV4},
 };
 
 use slab::Slab;
@@ -9,11 +9,15 @@ use tracing::{debug, error, instrument, trace};
 use crate::{
     server::services::arp_svc::ARPServiceHandle,
     tcp::{
-        TCPError, TCPState,
-        socket::{SocketServiceCall, SocketInternalHandle, SocketUserHandle, TCPCon, no_socket_found},
+        TCPError, TCPState, TCPTimerServiceHandle,
+        socket::{
+            SocketInternalHandle, SocketServiceCall, SocketUserHandle, TCPCon, no_socket_found,
+        },
     },
     utils::packet::{Packet, TCP},
 };
+
+const SOCKET_HANDLE_CHAN_SIZE: usize = 512;
 
 pub trait TransportService {
     type Error;
@@ -24,6 +28,7 @@ pub trait TransportService {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
+#[derive(Debug)]
 pub struct TCPServiceV1 {
     /// sender to dump outgoing IP packets into
     out_svc: ARPServiceHandle,
@@ -37,6 +42,7 @@ pub struct TCPServiceV1 {
     listen_table: HashMap<SocketAddrV4, usize>,
 
     port_svc: PortService,
+    timer_svc: TCPTimerServiceHandle,
 }
 
 impl TransportService for TCPServiceV1 {
@@ -45,11 +51,42 @@ impl TransportService for TCPServiceV1 {
     #[instrument(skip_all fields(call = %call))]
     async fn service_request(&mut self, call: SocketServiceCall) -> Result<(), TCPError> {
         match call {
-            SocketServiceCall::Connect { remote_addr, resp } => todo!(),
+            SocketServiceCall::Connect {
+                local_addr,
+                remote_addr,
+                resp,
+            } => {
+                let handle = self.new_connect(local_addr, remote_addr).await;
+                let key: Option<(usize, TCPCon)> = if let Ok(ref h) = handle {
+                    Some((h.1, h.2))
+                } else {
+                    None
+                };
+
+                if let Err(e) = resp.send(handle.map(|h| h.0)) {
+                    if let Some((key, con)) = key {
+                        self.socket_table.remove(key);
+                        self.con_table.remove(&con);
+                    }
+                    error!("couldnt send response for connect socket: {:?}", e);
+                };
+                Ok(())
+            }
             SocketServiceCall::Listen { listen_addr, resp } => {
                 let handle = self.new_listen(listen_addr).await;
-                // TODO: handle send error by deallocating
-                resp.send(handle);
+                let key: Option<usize> = if let Ok(ref h) = handle {
+                    Some(h.1)
+                } else {
+                    None
+                };
+
+                if let Err(e) = resp.send(handle.map(|h| h.0)) {
+                    if let Some(k) = key {
+                        self.socket_table.remove(k);
+                        self.listen_table.remove(&listen_addr);
+                    }
+                    error!("couldnt send response for listen socket: {:?}", e);
+                };
                 Ok(())
             }
             SocketServiceCall::Close { socket_key } => todo!(),
@@ -61,30 +98,73 @@ impl TransportService for TCPServiceV1 {
 
 impl TCPServiceV1 {
     pub fn new(out_svc: ARPServiceHandle) -> Self {
+        let timer_svc = TCPTimerServiceHandle::init();
         Self {
             out_svc,
             socket_table: Slab::new(),
             con_table: HashMap::new(),
             listen_table: HashMap::new(),
             port_svc: PortService::new(),
+            timer_svc,
         }
     }
 
-    async fn new_listen(&mut self, addr: SocketAddrV4) -> Result<SocketUserHandle, TCPError> {
-        self.port_svc.register(addr.port())?;
+    async fn new_listen(
+        &mut self,
+        local_addr: SocketAddrV4,
+    ) -> Result<(SocketUserHandle, usize), TCPError> {
+        self.port_svc.register(local_addr.port())?;
 
-        debug!(%addr, "new listening socket");
+        debug!(%local_addr, "new listening socket");
 
-        let sock = SocketInternalHandle::listen(self.out_svc.clone(), addr, 100);
+        let timer_tx = self.timer_svc.register_socket().await;
+        let sock = SocketInternalHandle::listen(
+            self.out_svc.clone(),
+            local_addr,
+            SOCKET_HANDLE_CHAN_SIZE,
+            timer_tx,
+        );
         let key = self.socket_table.vacant_key();
         let user_handler = sock.user_handle(key);
 
         self.socket_table.insert(sock);
-        self.listen_table.insert(addr, key);
+        self.listen_table.insert(local_addr, key);
 
-        Ok(user_handler)
+        Ok((user_handler, key))
     }
 
+    async fn new_connect(
+        &mut self,
+        local_addr: Ipv4Addr,
+        remote_addr: SocketAddrV4,
+    ) -> Result<(SocketUserHandle, usize, TCPCon), TCPError> {
+        let port = self.port_svc.request();
+        let local_addr = SocketAddrV4::new(local_addr, port);
+        let con = TCPCon {
+            local_ip: *local_addr.ip(),
+            local_port: local_addr.port(),
+            remote_ip: *remote_addr.ip(),
+            remote_port: remote_addr.port(),
+        };
+
+        debug!(%local_addr, "new connecting socket");
+
+        let timer_tx = self.timer_svc.register_socket().await;
+        let sock = SocketInternalHandle::connect(
+            self.out_svc.clone(),
+            local_addr,
+            remote_addr,
+            SOCKET_HANDLE_CHAN_SIZE,
+            timer_tx,
+        );
+        let key = self.socket_table.vacant_key();
+        let user_handler = sock.user_handle(key);
+
+        self.socket_table.insert(sock);
+        self.con_table.insert(con, key);
+
+        Ok((user_handler, key, con))
+    }
     // OPTIMIZE:
     // we are requesting the status for every submitted packet, no bueno!
     // we should use another MPSC channel such that sockets can inform the service of state changes
@@ -158,6 +238,7 @@ impl TCPServiceV1 {
 /// This service manages occupied and free ports
 ///
 /// OPTIMIZE: a bitmap approach is probably better
+#[derive(Debug)]
 struct PortService {
     freelist: VecDeque<u16>,
     taken: BTreeSet<u16>,
