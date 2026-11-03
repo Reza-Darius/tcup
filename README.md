@@ -8,7 +8,7 @@ Tcup is an asynchronous virtual networking interface capable of handling TCP/IP 
 
 ## Working Features
 
-- uses linux TAP devices to create a virtual interface
+- Linux TAP devices to create a virtual interface
 - Layer 2 packet switching: Ethernet Frames (RFC 1042) and ARP (RFC 826)
 - ICMP echoes (RFC 792)
 - Fully asynchronous actor architecture powered by tokio
@@ -78,20 +78,3 @@ async fn main() {
     handler.join().unwrap();
 }
 ```
-
-## Getting Started (coming soon)
-
-build with cargo
-
-```
-cargo install tcup
-```
-
-run with elevated permissions and run it with an ip and subnet
-
-```
-sudo setcap cap_net_admin=ep /usr/bin/tcup
-tcup 10.0.0.4/24
-```
-
-open a port with your language of choice and enjoy some reliable packets!
