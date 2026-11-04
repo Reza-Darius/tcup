@@ -45,7 +45,7 @@ impl Packet<ICMP> {
             return Err(ICMPError(format!("invalid ICMP checksum: {check}")));
         }
 
-        Ok(Packet::<ICMP>::from_vec(data.into_buf()))
+        Ok(Packet::<ICMP>::from_vec_unchecked(data.into_buf()))
     }
 
     /// service the incoming ICMP packet

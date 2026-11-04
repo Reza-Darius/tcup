@@ -122,7 +122,7 @@ impl TCPHdr {
         self.flags & TCPFlags::ACK == TCPFlags::ACK
     }
 
-    pub fn pure_ack(&self) -> bool {
+    pub fn is_pure_ack(&self) -> bool {
         self.is_ack() && !self.is_syn() && !self.is_fin() && !self.is_rst()
     }
 
@@ -210,7 +210,7 @@ impl Packet<TCP> {
             return Err(ParseError);
         }
 
-        let tcp_packet = Packet::<TCP>::from_vec(packet.into_buf());
+        let tcp_packet = Packet::<TCP>::from_vec_unchecked(packet.into_buf());
         Ok(tcp_packet)
     }
 
@@ -224,7 +224,7 @@ impl Packet<TCP> {
         hdr.set_len(TCP_HDR_MINSIZE + opts.len());
         let payload_offset = ETH_HDR_SIZE + IP_HDR_MINSIZE as usize + hdr.len();
 
-        // data is the entire buffer, payload len the len of the TCP payload only
+        // data is the entire packet buffer, payload len is the len of the TCP payload only
         let (data, payload_len) = match payload {
             Some(payload) => {
                 let payload_len = payload.len();
@@ -235,7 +235,7 @@ impl Packet<TCP> {
 
         debug_assert!(payload_offset + payload_len <= ETH_FRAME_MAX_SIZE);
 
-        let mut packet = Packet::<TCP>::from_vec(data);
+        let mut packet = Packet::<TCP>::from_vec_unchecked(data);
 
         packet.set_hdr(hdr);
         packet.set_options(opts);
@@ -246,6 +246,7 @@ impl Packet<TCP> {
         ));
 
         let packet = Packet::<IP>::new(sip, dip, packet.into()).unwrap();
+
         debug_assert!(
             packet.len() == ETH_HDR_SIZE + IP_HDR_MINSIZE as usize + packet.payload().len()
         );
@@ -273,6 +274,7 @@ impl Packet<TCP> {
         }
     }
 
+    #[inline(always)]
     fn iphdr_size(&self) -> usize {
         // TODO: dynamic reading of IP header with options
         IP_HDR_MINSIZE as usize
@@ -286,16 +288,19 @@ impl Packet<TCP> {
     }
 
     /// destination socket addr
+    #[inline(always)]
     pub fn d_addr(&self) -> SocketAddrV4 {
         SocketAddrV4::new(self.ip_hdr().dip(), self.hdr().dport.get())
     }
 
     /// source socket addr
+    #[inline(always)]
     pub fn s_addr(&self) -> SocketAddrV4 {
         SocketAddrV4::new(self.ip_hdr().sip(), self.hdr().sport.get())
     }
 
     /// retrieves the the IP payload
+    #[inline(always)]
     fn ip_pay(&self) -> &[u8] {
         let tot_len = self.ip_hdr().tot_len();
         &self.as_buf()[ETH_HDR_SIZE..ETH_HDR_SIZE + tot_len as usize]
@@ -309,6 +314,7 @@ impl Packet<TCP> {
         res
     }
 
+    #[inline(always)]
     pub fn hdr(&self) -> &TCPHdr {
         let offset = ETH_HDR_SIZE + self.iphdr_size();
         TCPHdr::ref_from_prefix(&self.as_buf()[offset..])
@@ -317,6 +323,7 @@ impl Packet<TCP> {
     }
 
     /// the starting point of the TCP header inside the buffer
+    #[inline(always)]
     fn tcp_offset(&self) -> usize {
         ETH_HDR_SIZE + self.iphdr_size()
     }
@@ -477,7 +484,6 @@ impl std::fmt::Display for Packet<TCP> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem::size_of;
 
     fn zero_hdr() -> TCPHdr {
         TCPHdr::read_from_bytes(&[0u8; TCP_HDR_MINSIZE]).unwrap()

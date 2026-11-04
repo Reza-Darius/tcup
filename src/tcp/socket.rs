@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::sync::{mpsc::Sender, oneshot};
-use tracing::{error, warn};
+use tracing::warn;
 
 use crate::{
     server::services::arp_svc::ARPServiceHandle,
@@ -75,6 +75,9 @@ impl SocketUserHandle {
         rx.await.map_err(|_| ChannelError).flatten()
     }
 
+    // OPTIMIZE:
+    // accept a buffer arg and send the pointer to he socket so it can directly write to
+    // it
     pub async fn recv(&mut self) -> Result<Vec<u8>, TCPError> {
         let (tx, rx) = oneshot::channel();
         self.sender
@@ -190,7 +193,7 @@ impl SocketInternalHandle {
 }
 
 /// a TCP connection identifier
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct TCPCon {
     pub local_ip: Ipv4Addr,
     pub local_port: u16,
@@ -218,12 +221,10 @@ pub enum SocketServiceCall {
         remote_addr: SocketAddrV4,
         resp: oneshot::Sender<Result<SocketUserHandle, TCPError>>,
     },
-
     Listen {
         listen_addr: SocketAddrV4,
         resp: oneshot::Sender<Result<SocketUserHandle, TCPError>>,
     },
-
     Close {
         socket_key: usize,
     },

@@ -18,7 +18,6 @@ bytes = "1.11.1"
 derive_more = { version = "2.1.1", features = ["full"] }
 futures = "0.3.32"
 libc = "0.2.183"
-mimalloc = "0.1.52"
 num_enum = "0.7.6"
 parking_lot = "0.12.5"
 pin-project-lite = "0.2.17"

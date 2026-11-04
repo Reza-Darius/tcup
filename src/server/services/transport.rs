@@ -4,7 +4,7 @@ use std::{
 };
 
 use slab::Slab;
-use tracing::{debug, error, instrument, trace};
+use tracing::{debug, error, instrument, trace, warn};
 
 use crate::{
     server::services::arp_svc::ARPServiceHandle,
@@ -184,10 +184,12 @@ impl TCPServiceV1 {
             trace!("connection found");
             match con_sock.send_seg(segment).await {
                 TCPState::Listen => {
+                    trace!("moving con socket back to listen table");
                     let s = self.con_table.remove(&seg_con).expect("we know its there");
                     self.listen_table.insert(listen_addr, s);
                 }
                 TCPState::Closed => {
+                    trace!("con socket closed, removing from tables");
                     self.con_table.remove(&seg_con);
                     self.port_svc.free(seg_con.local_port);
                 }
@@ -202,9 +204,8 @@ impl TCPServiceV1 {
             .get(&listen_addr)
             .and_then(|&key| self.socket_table.get(key))
         else {
-            error!(%listen_addr, "no socket found");
-
             if let Some(resp) = no_socket_found(segment).await {
+                warn!("no socket found, sending reset");
                 self.out_svc.send(resp.into()).await;
             };
             return Err(TCPError::SocketError("no socket found".into()));
@@ -217,11 +218,13 @@ impl TCPServiceV1 {
             TCPState::Listen => {}
             // going from listening to closed should probably not happen
             TCPState::Closed => {
+                trace!("listen socket closed, removing from tables");
                 self.listen_table.remove(&listen_addr);
                 self.port_svc.free(listen_addr.port());
             }
             // move from listening to connection table
             TCPState::SynReceived => {
+                trace!("moving listen socket to con table");
                 let s = self
                     .listen_table
                     .remove(&listen_addr)

@@ -393,8 +393,14 @@ impl AsyncWrite for TAPDevice {
             trace!(n_bytes = buf.len(), "writing bytes to TAP");
             match guard.try_io(|inner| rustix::io::write(inner.get_ref(), buf).map_err(Into::into))
             {
-                Ok(result) => return Poll::Ready(result),
-                Err(_would_block) => continue,
+                Ok(result) => {
+                    trace!(?result, "async write: success");
+                    return Poll::Ready(result)
+                },
+                Err(_would_block) => {
+                    trace!("async write: WOULD BLOCK, tying again...");
+                    continue
+                },
             }
         }
     }

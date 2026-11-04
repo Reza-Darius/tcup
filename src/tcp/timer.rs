@@ -13,11 +13,11 @@ use tracing::{debug, trace};
 use crate::tcp::heap::MinHeap;
 
 /// After sending the final FIN+ACK, you must linger before fully closing the socket. Prevents old duplicate segments from a dead connection being mistaken for a new one.
-pub const TIME_WAIT: u64 = MSL;
+pub const TIME_WAIT: Duration = MSL.saturating_mul(2);
 
 /// Maximum segment lifetime
-pub const MSL: u64 = 60; // seconds
-pub const FIN_TIMEOUT: u64 = 60; // seconds
+pub const MSL: Duration = Duration::from_secs(60);
+pub const CONNECTION_LIFETIME_LIMIT: Duration = Duration::from_secs(100);
 
 pub const CLOCK_GRANULARITY: u64 = 10; // miliseconds
 const SOCKET_CHAN_BUF_SIZE: usize = 1024;
@@ -45,12 +45,10 @@ impl PartialOrd for Timer {
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Hash)]
 pub enum TimerKind {
     RTO,
-    SynSent,
-    FinSent,
     TimeWait,
 }
 
-const N_TIMER: usize = 3;
+const N_TIMER: usize = 2;
 
 struct SocketEntry {
     sender: Sender<TimerKind>,
@@ -79,7 +77,7 @@ impl TCPTimer {
         let mut int = tokio::time::interval(Duration::from_millis(CLOCK_GRANULARITY));
         int.tick().await;
         loop {
-            tokio::select! {
+            tokio::select! {biased;
                 msg = self.rcv.recv() => {
                     if let Some(msg) = msg {
                         self.handle_msg(msg);
@@ -135,7 +133,7 @@ impl TCPTimer {
     fn update_generation(&mut self, socket_key: usize, kind: TimerKind) -> u32 {
         let entry = &mut self.sockets[socket_key].generations[kind as usize];
         let (generation, of) = entry.overflowing_add(1);
-        assert!(!of, "uhh overflow kinda breaks all this");
+        assert!(!of, "an overflow would make judging a timer ambiguous");
         *entry = generation;
         generation
     }
@@ -165,10 +163,8 @@ impl TCPTimer {
         let Some(first) = self.deadlines.peek().copied() else {
             return;
         };
-        let now = Instant::now();
-
         // is the time up?
-        if first.deadline > now {
+        if first.deadline > Instant::now() {
             return;
         }
 
@@ -184,6 +180,7 @@ impl TCPTimer {
             return;
         }
 
+        trace!(?first.kind, "sending timer notif");
         if let Err(e) = socket_entry.sender.send(first.kind).await {
             debug!("couldnt send timer notif to socket");
             self.sockets.remove(first.socket_key);
@@ -251,7 +248,8 @@ impl TCPTimerCBHandle {
                 kind,
                 deadline,
             })
-            .await;
+            .await
+            .expect("if this send fails the timer worker is down which is BIG trouble");
     }
     pub async fn remove_timer(&self, kind: TimerKind) {
         self.sender
@@ -260,7 +258,8 @@ impl TCPTimerCBHandle {
                 socket_key: self.socket_key,
                 kind,
             })
-            .await;
+            .await
+            .expect("if this send fails the timer worker is down which is BIG trouble");
     }
 }
 

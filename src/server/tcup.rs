@@ -125,7 +125,7 @@ impl TCupServer {
                     if let Some(call) = user_call {
                         self.trans_svc.service_request(call).await?
                     } else {
-                        warn!("user input channel closed!");
+                        warn!("TCup user channel closed");
                         break
                     }
                 }

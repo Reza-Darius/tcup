@@ -63,7 +63,7 @@ impl Packet<ETH> {
             .try_into()
             .map_err(|_| UnsupportedProtocol)?;
 
-        Ok(Packet::from_vec(data))
+        Ok(Packet::from_vec_unchecked(data))
     }
 
     pub fn into_parts(self) -> Result<(EthHdr, EthPayload), EthErr> {
@@ -115,7 +115,7 @@ impl Packet<ETH> {
             .write_to_prefix(&mut data)
             .expect("eth new: parsed frame has sufficient len");
 
-        Packet::from_vec(data)
+        Packet::from_vec_unchecked(data)
     }
 
     pub fn hdr(&self) -> &EthHdr {
@@ -307,7 +307,7 @@ mod tests {
     fn new_rejects_oversized_payload() {
         // Bypass the normal Arp constructors (which always produce a
         // small, MTU-safe frame) to exercise the size guard directly.
-        let oversized = EthPayload::Arp(Packet::<ARP>::from_vec(vec![0u8; ETH_FRAME_MAX_SIZE + 1]));
+        let oversized = EthPayload::Arp(Packet::<ARP>::from_vec_unchecked(vec![0u8; ETH_FRAME_MAX_SIZE + 1]));
         Packet::<ETH>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), oversized);
     }
 

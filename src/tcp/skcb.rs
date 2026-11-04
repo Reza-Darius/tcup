@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 use std::ops::{Deref, DerefMut};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
-use tracing::{debug, error, instrument, trace};
+use tracing::{debug, error, instrument, trace, warn};
 
 use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::server::services::arp_svc::ARPServiceHandle;
@@ -15,14 +15,13 @@ use crate::tcp::buffer::{RecvBuf, SendBuf};
 use crate::tcp::error::TCPError::{self};
 use crate::tcp::handler::{TCP_HDR_MINSIZE, seg_handler};
 use crate::tcp::tcp_packet::{TCP_HDR_OFFSET, TCP_SEG_MAX_SIZE, TCPPayload};
-use crate::tcp::timer::{TCPTimerCBHandle, TimerKind};
+use crate::tcp::timer::{CONNECTION_LIFETIME_LIMIT, TCPTimerCBHandle, TimerKind};
 use crate::tcp::{
     opts::TCPOpts,
     rto::RTO,
     seq::*,
     socket::*,
     tcp_packet::{TCPFlags, TCPHdr},
-    timer::TIME_WAIT,
 };
 use crate::utils::packet::{Packet, TCP};
 
@@ -34,6 +33,7 @@ pub const SYN_ACK_RETRIES: u64 = 5;
 pub const SND_RCV_BUF_SIZE: u16 = 10000;
 pub const SND_MAX_TRIES: u8 = 5;
 
+const SYN_RETRY_LIMIT: u8 = 6;
 type Result<T> = std::result::Result<T, TCPError>;
 
 // this is just a wrapper, see below for the real meat and potatoes
@@ -131,11 +131,12 @@ pub struct TCB {
     pub rto: RTO,
     pub rto_set: bool,
 
-    pub shutdown_init: bool,
-    /// how many times did we try to send a syn
     pub syn_retries: u8,
-    /// how many times we tried to send the last data segment
-    pub data_retries: u8,
+    /// this timestamp is recorded whenever SND_UNA is advanced to see whether the connection timed
+    /// out
+    pub last_received_ack: Option<Instant>,
+
+    pub shutdown_init: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -198,13 +199,7 @@ impl SKCB {
     /// event loop listening for user calls, data segments and timers
     pub async fn run(mut self) -> Result<()> {
         loop {
-            // we need to linger after closing the socket before reopening it as to not confuse
-            // packets for the old connection
-            if matches!(self.status, TCPState::TimeWait) {
-                tokio::time::sleep(Duration::new(TIME_WAIT, 0)).await;
-                break;
-            }
-
+            trace!("waiting for event...");
             if matches!(self.status, TCPState::Closed) {
                 break;
             }
@@ -241,6 +236,21 @@ impl SKCB {
             TimerKind::RTO => {
                 trace!("RTO fired");
 
+                if matches!(self.status, TCPState::SynSent | TCPState::SynReceived)
+                    && self.tcb.syn_retries > SYN_RETRY_LIMIT
+                {
+                    warn!("SYN retry limit reached");
+                    self.change_state(TCPState::Closed);
+                }
+
+                if let Some(last) = self.tcb.last_received_ack
+                    && last.elapsed() >= CONNECTION_LIFETIME_LIMIT
+                {
+                    warn!("connection timed out");
+                    self.change_state(TCPState::Closed);
+                    return Ok(());
+                }
+
                 // - retransmit segment
                 self.retransmit().await?;
 
@@ -248,8 +258,6 @@ impl SKCB {
                 self.tcb.rto.backoff();
                 self.start_rto().await;
             }
-            TimerKind::SynSent => todo!(),
-            TimerKind::FinSent => todo!(),
             TimerKind::TimeWait => todo!(),
         }
         Ok(())
@@ -308,10 +316,10 @@ impl SKCB {
                             Ok(_) => {
                                 let window = self.usable_window();
                                 if window > 0 {
-                                    trace!("sending data");
+                                    trace!("window permits sending data immediately");
                                     self.send_ack().await?;
                                 } else {
-                                    trace!(window, "cant send data: window is closed")
+                                    trace!(window, "cant send data right now: window is closed")
                                 }
                                 Ok(())
                             }
@@ -333,9 +341,9 @@ impl SKCB {
         Ok(())
     }
 
-    /// a template for a header
+    /// get a header based on current TCB values
     #[inline(always)]
-    fn hdr_t(&self) -> TCPHdr {
+    fn hdr_template(&self) -> TCPHdr {
         TCPHdr {
             sport: self.l_addr.port().into(),
             dport: self.r_addr.unwrap().port().into(),
@@ -431,12 +439,13 @@ impl SKCB {
 
     /// disables the RTO timer
     pub(super) async fn stop_rto(&mut self) {
+        trace!(rto = ?self.tcb.rto.rto(), "stopping RTO");
         self.tcb.rto_set = false;
         self.timer_chan.remove_timer(TimerKind::RTO).await;
     }
 
     pub(super) async fn retransmit(&mut self) -> Result<()> {
-        let mut hdr = self.hdr_t();
+        let mut hdr = self.hdr_template();
         let con = self.con();
 
         // get a payload
@@ -445,6 +454,7 @@ impl SKCB {
         match self.status {
             TCPState::SynSent => {
                 hdr.set_syn();
+                self.tcb.syn_retries += 1;
                 seg_len -= 1;
             }
             TCPState::SynReceived => {
@@ -545,6 +555,10 @@ impl SKCB {
             self.start_rto().await;
         }
 
+        if hdr.is_syn() {
+            self.tcb.syn_retries += 1;
+        }
+
         let packet = Packet::<TCP>::new(con.local_ip, con.remote_ip, hdr, opts, payload);
 
         debug!(%hdr, "sending packet out"); // this prints incomplete information about the header but thats fine
@@ -556,7 +570,7 @@ impl SKCB {
     ///
     /// can also serve as challenge ack
     pub(super) async fn send_ack(&mut self) -> Result<()> {
-        let mut tcp_hdr = self.hdr_t();
+        let mut tcp_hdr = self.hdr_template();
         let payload = self.check_snd_data(0);
 
         tcp_hdr.set_ack();
@@ -564,7 +578,7 @@ impl SKCB {
     }
 
     pub(super) async fn send_fin(&mut self) -> Result<()> {
-        let mut tcp_hdr = self.hdr_t();
+        let mut tcp_hdr = self.hdr_template();
         let payload = self.check_snd_data(0);
 
         // FIN takes one seq number
@@ -575,7 +589,7 @@ impl SKCB {
     }
 
     pub(super) async fn send_fin_ack(&mut self) -> Result<()> {
-        let mut tcp_hdr = self.hdr_t();
+        let mut tcp_hdr = self.hdr_template();
         let payload = self.check_snd_data(0);
 
         // FIN takes one seq number
@@ -589,7 +603,7 @@ impl SKCB {
 
     pub(super) async fn send_rst(&mut self) -> Result<()> {
         let inner = &self.inner;
-        let mut tcp_hdr = self.hdr_t();
+        let mut tcp_hdr = self.hdr_template();
 
         tcp_hdr.set_rst();
 

@@ -37,7 +37,7 @@ impl<P: PacketType> PacketBuf for Packet<P> {
 
     /// unsafe conversion, reserved parsing functions
     #[inline(always)]
-    fn from_vec(data: Vec<u8>) -> Self {
+    fn from_vec_unchecked(data: Vec<u8>) -> Self {
         Packet {
             data,
             l_type: PhantomData,
@@ -66,7 +66,7 @@ pub trait PacketBuf {
     fn as_buf_mut(&mut self) -> &mut [u8];
     fn buf_ref_mut(&mut self) -> &mut Vec<u8>;
     fn into_buf(self) -> Vec<u8>;
-    fn from_vec(data: Vec<u8>) -> Self;
+    fn from_vec_unchecked(data: Vec<u8>) -> Self;
 
     /// length of the entire buffer
     fn len(&self) -> usize {

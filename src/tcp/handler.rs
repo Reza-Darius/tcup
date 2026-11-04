@@ -1,5 +1,6 @@
 use std::assert_matches;
 use std::net::SocketAddrV4;
+use std::time::Instant;
 
 use tracing::trace;
 
@@ -217,6 +218,7 @@ async fn listen(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     tcp_hdr.set_syn();
     tcp_hdr.set_ack();
     tcp_hdr.set_len(TCP_HDR_MINSIZE + opts.len());
+    skcb.tcb.syn_retries = 1;
 
     skcb.output(tcp_hdr, opts, None).await?;
     skcb.change_state(TCPState::SynReceived);
@@ -260,6 +262,7 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
         // our syn got acked, we move the window
         skcb.tcb.snd_una = skcb.tcb.seg_ack;
+        skcb.tcb.last_received_ack = Some(Instant::now());
         return established(skcb, seg).await;
     } else {
         let mut tcp_hdr = TCPHdr {
@@ -318,6 +321,7 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
         if seg_hdr.is_ack() {
             skcb.tcb.snd_una = skcb.tcb.seg_ack;
+            skcb.tcb.last_received_ack = Some(Instant::now());
             debug_assert_eq!(skcb.tcb.snd_una, skcb.tcb.snd_nxt);
 
             if seq_gt(skcb.tcb.snd_una, skcb.tcb.iss) {
@@ -342,6 +346,7 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
             tcp_hdr.set_syn();
             tcp_hdr.set_ack();
+            skcb.tcb.syn_retries = 1;
 
             skcb.output(tcp_hdr, TCPOpts::default(), None).await?;
             skcb.change_state(TCPState::SynReceived);
@@ -510,6 +515,7 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
 
             skcb.snd_buf.free(acked);
             skcb.tcb.snd_una = seg_ack;
+            skcb.tcb.last_received_ack = Some(Instant::now());
 
             // - If the received segment acknowledges all outstanding data (snd_una equals snd_max), the
             //   retransmission timer is turned off. Otherwise, if the persist timer is off, the retransmit timer is restarted
@@ -563,8 +569,8 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
 
 enum AcceptResult {
     Not,
-    /// might also be a pure ACK (ACK without any new data)
     Data,
+    PureAck,
     Fin,
 }
 
@@ -576,13 +582,13 @@ fn accept_data(skcb: &mut SKCB, seg_hdr: &TCPHdr, seg_payload: Option<TCPPayload
     let seg_seq = skcb.tcb.seg_seq;
     let snd_nxt = skcb.tcb.snd_nxt;
 
-    // TODO:
-    // If this test is false, then the received segment is
-    // either a retransmission or a segment beyond the one expected
-    // right now we just drop the packet
-
     if skcb.tcb.seg_seq != skcb.tcb.rcv_nxt {
         return AcceptResult::Not;
+    } else {
+        // TODO:
+        // If this check returns false, then the received segment is
+        // either a retransmission or a segment beyond the one expected
+        // right now we just drop the packet
     }
 
     // since this routine runs after check_seg() the only possible case left is seg_seq == rcv_next

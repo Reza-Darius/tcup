@@ -5,11 +5,8 @@ use tracing::trace;
 
 use crate::tcp::timer::CLOCK_GRANULARITY;
 
-const RTO_START: u64 = 1000; // ms
-const RTO_CAP: u64 = RTO_START * 60; // one minute
-
-const MIN: Duration = Duration::from_millis(RTO_START);
-const MAX: Duration = Duration::from_millis(RTO_CAP);
+const MIN: Duration = Duration::from_secs(1);
+const MAX: Duration = Duration::from_mins(1);
 
 /// RFC 6298 retransmission timer state: SRTT, RTTVAR and the current RTO.
 #[derive(Debug, Clone, Copy)]

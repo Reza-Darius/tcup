@@ -99,7 +99,7 @@ impl Packet<IP> {
             return Err(ParseError("total length exceeds eth_pay length".into()));
         }
 
-        Ok(Packet::from_vec(packet))
+        Ok(Packet::from_vec_unchecked(packet))
     }
 
     pub fn into_parts(self) -> Result<(IPv4Hdr, Ipv4Payload), IpErr> {
