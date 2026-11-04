@@ -147,7 +147,7 @@ impl TCPServiceV1 {
             remote_port: remote_addr.port(),
         };
 
-        debug!(%local_addr, "new connecting socket");
+        debug!(%con, "new connecting socket");
 
         let timer_tx = self.timer_svc.register_socket().await;
         let sock = SocketInternalHandle::connect(

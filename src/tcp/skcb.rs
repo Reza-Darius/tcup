@@ -169,7 +169,7 @@ impl SKCB {
     pub(super) fn new(
         rx: Receiver<SKCBMessage>,
         tx: ARPServiceHandle,
-        addr: SocketAddrV4,
+        local_addr: SocketAddrV4,
         timer_tx: TCPTimerCBHandle,
     ) -> Self {
         let mut skcb = SKCB {
@@ -184,7 +184,7 @@ impl SKCB {
                 rcv_buf: RecvBuf::new(SND_RCV_BUF_SIZE as usize),
                 status: TCPState::Closed,
 
-                l_addr: addr,
+                l_addr: local_addr,
                 r_addr: None,
 
                 pending_rcv: VecDeque::new(),
@@ -291,6 +291,7 @@ impl SKCB {
 
                 if let Some(data) = self.rcv_buf.pop_first() {
                     resp.send(Ok(data)).map_err(|_| ChannelError)?;
+                    self.tcb.rcv_wnd = self.rcv_buf.available_cap();
                 } else {
                     self.pending_rcv.push_back(resp);
                     trace!("cant service receive request, queueing it")
@@ -307,7 +308,10 @@ impl SKCB {
 
                 let result = match self.status {
                     // queue up data to be sent later
-                    TCPState::SynSent | TCPState::SynReceived => self.snd_buf.insert(data),
+                    TCPState::SynSent | TCPState::SynReceived => {
+                        trace!("queueing send request for later");
+                        self.snd_buf.insert(data)
+                    }
 
                     // send some data if we can
                     TCPState::Established | TCPState::CloseWait => {
@@ -350,7 +354,7 @@ impl SKCB {
             seq: self.tcb.snd_nxt.into(),
             ack: self.tcb.rcv_nxt.into(),
             flags: TCPFlags::default(),
-            win_size: self.tcb.rcv_wnd.into(),
+            win_size: self.rcv_buf.available_cap().into(),
             ..Default::default()
         }
     }
@@ -392,10 +396,14 @@ impl SKCB {
             return None;
         }
 
-        // we request at most 1460 - opt len bytes for the payload
+        // we request at most mss - opt len bytes for the payload
         let n_send_bytes = u32::min(
             self.usable_window(),
-            TCP_SEG_MAX_SIZE as u32 - opt_len as u32,
+            self.tcb
+                .snd_opts
+                .mss
+                .expect("we need to know the MSS at this point") as u32
+                - opt_len as u32,
         );
 
         let data = self.snd_buf.get_una_seg(n_send_bytes)?;
@@ -612,7 +620,7 @@ impl SKCB {
                 tcp_hdr.seq = self.tcb.seg_ack.into();
             }
             _ => {
-                if tcp_hdr.is_ack() {
+                if self.check_ack() {
                     tcp_hdr.seq = tcp_hdr.ack;
                 } else {
                     tcp_hdr.seq = 0.into();
@@ -626,17 +634,14 @@ impl SKCB {
     }
 
     /// checks for acceptable ACK
-    pub(super) fn check_ack(&self, tcp_hdr: &TCPHdr) -> bool {
-        if !tcp_hdr.is_ack() {
-            return false;
-        }
-
+    pub(super) fn check_ack(&self) -> bool {
         let inner = &self.inner;
 
         let snd_una = inner.tcb.snd_una;
         let seg_ack = inner.tcb.seg_ack;
         let snd_nxt = inner.tcb.snd_nxt;
 
+        // SND_UNA < SEG_ACK <= SND_NXT
         seq_lt(snd_una, seg_ack) && seq_lte(seg_ack, snd_nxt)
     }
 
@@ -706,6 +711,7 @@ impl SKCB {
                 .expect("we just checked")
                 .send(Ok(data))
                 .expect("the receiver should block on this call");
+            self.tcb.rcv_wnd = self.rcv_buf.available_cap();
         }
     }
 

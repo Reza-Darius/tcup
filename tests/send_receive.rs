@@ -60,4 +60,5 @@ async fn send_receive() {
 
     socket.send(response).await.unwrap();
     handler.await.unwrap();
+    sleep(Duration::from_secs(1)).await;
 }

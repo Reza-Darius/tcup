@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 
 use bytes::BufMut;
 use num_enum::TryFromPrimitive;
-use tracing::trace;
+use tracing::{trace, warn};
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16};
 
 use crate::eth::Mac;
@@ -75,7 +75,8 @@ impl Packet<IP> {
 
         // options arent supported
         if hdr_size > IP_HDR_MINSIZE {
-            return Err(ParseError("IP header above supported 20 bytes".into()));
+            warn!("ip packet over 20 bytes");
+            // return Err(ParseError("IP header above supported 20 bytes".into()));
         }
 
         let hdr = IPv4Hdr::read_from_prefix(eth_pay)

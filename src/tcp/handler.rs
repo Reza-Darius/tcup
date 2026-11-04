@@ -136,7 +136,7 @@ pub async fn active_open(skcb: &mut SKCB, remote_addr: SocketAddrV4) -> Result<(
         seq: skcb.tcb.iss.into(),
         ack: 0.into(),
         flags: TCPFlags::default(),
-        win_size: WND_SIZE.into(),
+        win_size: skcb.rcv_buf.available_cap().into(),
         ..Default::default()
     };
 
@@ -291,22 +291,21 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 /// event handler for SYN SENT state
 async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     let seg_hdr = seg.hdr();
+    let mut ack_ok = false;
 
-    if seg_hdr.is_ack() {
-        if seg_hdr.is_rst() {
+    if seg_hdr.is_ack() || skcb.check_ack() {
+        if seq_lte(skcb.tcb.seg_ack, skcb.tcb.iss) || seq_gt(skcb.tcb.seg_ack, skcb.tcb.snd_nxt) {
+            if !seg_hdr.is_rst() {
+                skcb.send_rst().await?;
+            }
             return Ok(());
         }
-
-        if seq_lte(skcb.tcb.seg_ack, skcb.tcb.iss) || seq_gt(skcb.tcb.seg_ack, skcb.tcb.snd_nxt) {
-            skcb.send_rst().await.unwrap();
-        }
-        // we dont support data on SYN
-        return Ok(());
+        ack_ok = true
     }
 
     if seg_hdr.is_rst() {
-        if skcb.check_ack(seg_hdr) {
-            skcb.change_state(TCPState::Closed);
+        if ack_ok {
+            skcb.change_state(TCPState::Closed); // connection refused
         }
         return Ok(());
     }
@@ -318,22 +317,28 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     if seg_hdr.is_syn() {
         skcb.tcb.rcv_nxt = skcb.tcb.seg_seq.wrapping_add(1);
         skcb.tcb.irs = skcb.tcb.seg_seq;
+        // If an MSS Option is not received at connection setup, TCP implementations MUST assume a default send MSS of 536 (576 - 40) for IPv4 or 1220 (1280 - 60) for IPv6 (MUST-15).
+        skcb.tcb.snd_opts = seg.options().unwrap_or_else(|| TCPOpts {
+            mss: Some(536),
+            ..Default::default()
+        });
 
-        if seg_hdr.is_ack() {
+        if ack_ok {
             skcb.tcb.snd_una = skcb.tcb.seg_ack;
             skcb.tcb.last_received_ack = Some(Instant::now());
+            skcb.stop_rto().await;
             debug_assert_eq!(skcb.tcb.snd_una, skcb.tcb.snd_nxt);
+        }
 
-            if seq_gt(skcb.tcb.snd_una, skcb.tcb.iss) {
-                skcb.change_state(TCPState::Established);
-                skcb.send_ack().await?;
-            }
+        skcb.tcb.snd_wnd = skcb.tcb.seg_wnd;
+        skcb.tcb.snd_wl1 = skcb.tcb.seg_seq;
+        skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
+
+        if seq_gt(skcb.tcb.snd_una, skcb.tcb.iss) {
+            skcb.change_state(TCPState::Established);
+            skcb.send_ack().await?;
         } else {
             // simultaneous open path: we got a syn but not ack in response to our syn
-            skcb.tcb.snd_wnd = skcb.tcb.seg_wnd;
-            skcb.tcb.snd_wl1 = skcb.tcb.seg_seq;
-            skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
-
             let mut tcp_hdr = TCPHdr {
                 sport: skcb.l_addr.port().into(),
                 dport: skcb.r_addr.unwrap().port().into(),
@@ -343,12 +348,16 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
                 win_size: WND_SIZE.into(),
                 ..Default::default()
             };
+            let opts = TCPOpts {
+                mss: Some(TCP_SEG_MAX_SIZE as u16),
+                ..Default::default()
+            };
 
             tcp_hdr.set_syn();
             tcp_hdr.set_ack();
             skcb.tcb.syn_retries = 1;
 
-            skcb.output(tcp_hdr, TCPOpts::default(), None).await?;
+            skcb.output(tcp_hdr, opts, None).await?;
             skcb.change_state(TCPState::SynReceived);
 
             // TODO:
@@ -356,7 +365,7 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         }
     }
 
-    todo!()
+    Ok(())
 }
 
 /// event handler for FIN WAIT1 state
@@ -410,7 +419,7 @@ async fn finwait2(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 /// event handler for CLOSING state
 ///
 /// here we sent a fin and received a fin, but didnt have our fin acked yet
-async fn closing(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
+async fn closing(skcb: &mut SKCB, _: Packet<TCP>) -> Result<()> {
     check_ack(skcb).await?;
     let sent_fin_accepted = skcb.tcb.snd_una == skcb.tcb.snd_nxt;
 
@@ -424,7 +433,7 @@ async fn closing(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 ///
 /// this is the state for the other side sent a FIN which we ackd
 /// so we can still send data, and want to empty our snd buffer
-async fn close_wait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
+async fn close_wait(skcb: &mut SKCB, _: Packet<TCP>) -> Result<()> {
     // TODO: empty send buffer and send FIN packet
 
     check_ack(skcb).await?;
@@ -439,12 +448,12 @@ async fn close_wait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 /// event handler for LAST ACK state
 ///
 /// we are watiting for an ack for our fin
-async fn last_ack(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
+async fn last_ack(skcb: &mut SKCB, _: Packet<TCP>) -> Result<()> {
     // TODO: handle inc ACKs, sender is done sending
     // TODO: account for sent FIN flag
 
     // waiting for our FIN to be ACKed before closing
-    if skcb.check_ack(seg.hdr()) {
+    if skcb.check_ack() {
         skcb.change_state(TCPState::Closed);
         Ok(())
     } else {
@@ -570,18 +579,11 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
 enum AcceptResult {
     Not,
     Data,
-    PureAck,
     Fin,
 }
 
 /// helper functon for handling receiving data, returns true if the data was accepted
 fn accept_data(skcb: &mut SKCB, seg_hdr: &TCPHdr, seg_payload: Option<TCPPayload>) -> AcceptResult {
-    // shorthand variables
-    let snd_una = skcb.tcb.snd_una;
-    let seg_ack = skcb.tcb.seg_ack;
-    let seg_seq = skcb.tcb.seg_seq;
-    let snd_nxt = skcb.tcb.snd_nxt;
-
     if skcb.tcb.seg_seq != skcb.tcb.rcv_nxt {
         return AcceptResult::Not;
     } else {

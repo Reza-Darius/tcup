@@ -7,7 +7,7 @@ use crate::{
 use std::{collections::HashMap, net::Ipv4Addr};
 
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tracing::debug;
+use tracing::{debug, trace};
 
 #[derive(Debug)]
 struct ARPStore {
@@ -109,13 +109,18 @@ impl ARPService {
     async fn service_arp(&mut self, packet: Packet<ARP>) {
         if let Some(event) = packet.service(&mut self.store) {
             match event {
-                crate::eth::ARPServiceResult::Reply(packet) => self.send_frame(packet).await,
+                crate::eth::ARPServiceResult::Reply(packet) => {
+                    trace!("sending ARP reply");
+                    self.send_frame(packet).await
+                }
                 crate::eth::ARPServiceResult::Updated(ipv4_addr) => {
+                    trace!("updated entry in ARP table, checking packet queue");
                     // check for queued up packets in case we updated an ARP entry
                     if let Some(waiting_packets) = self.check_queue(ipv4_addr) {
                         let mac = self.get_mac(ipv4_addr).expect("it needs to be there now");
                         for packet in waiting_packets {
                             let frame = packet.to_eth(mac, self.store.if_addr.0);
+                            trace!("sending queued IP packet");
                             self.send_frame(frame).await;
                         }
                     }
@@ -126,13 +131,22 @@ impl ARPService {
 
     async fn service_ip(&mut self, packet: Packet<IP>) {
         if let Some(mac) = self.get_mac(packet.dip()) {
+            trace!(req = %packet.dip(), "MAC found in ARP table, sending out");
             let frame = packet.to_eth(mac, self.store.if_addr.0);
             self.send_frame(frame).await;
         } else {
-            // we queue up pending packets
-            let frame = self.request_mac(packet.dip());
+            // this is quick and dirty to get packets out, normally we wouldnt do this
+            let mac = self.store.if_addr.0;
+            let frame = packet.to_eth(mac, mac);
             self.send_frame(frame).await;
-            self.queue_packet(packet);
+            // trace!(
+            //     req = %packet.dip(),
+            //     "MAC not found, queueing packet for later"
+            // );
+            // // we queue up pending packets
+            // let frame = self.request_mac(packet.dip());
+            // self.send_frame(frame).await;
+            // self.queue_packet(packet);
         }
     }
 

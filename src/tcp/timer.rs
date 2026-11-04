@@ -181,8 +181,8 @@ impl TCPTimer {
         }
 
         trace!(?first.kind, "sending timer notif");
-        if let Err(e) = socket_entry.sender.send(first.kind).await {
-            debug!("couldnt send timer notif to socket");
+        if socket_entry.sender.send(first.kind).await.is_err() {
+            trace!("couldnt send timer notif to socket, it might be closed");
             self.sockets.remove(first.socket_key);
         }
     }

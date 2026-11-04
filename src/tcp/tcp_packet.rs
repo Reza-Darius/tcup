@@ -6,7 +6,7 @@ use tracing::warn;
 use zerocopy::{BE, FromBytes, Immutable, IntoBytes, KnownLayout, U16, U32};
 
 use crate::eth::{ETH_FRAME_MAX_SIZE, ETH_HDR_SIZE, ETH_PAY_MAX_SIZE};
-use crate::ip::{IP_HDR_MINSIZE, IP_HDR_OFFSET, IPPROTO_TCP, IPv4Hdr};
+use crate::ip::{IP_HDR_MAXSIZE, IP_HDR_MINSIZE, IP_HDR_OFFSET, IPPROTO_TCP, IPv4Hdr};
 use crate::tcp::error::TCPError::{self, ParseError};
 use crate::tcp::opts::TCPOpts;
 use crate::tcp::socket::TCPCon;
@@ -276,8 +276,7 @@ impl Packet<TCP> {
 
     #[inline(always)]
     fn iphdr_size(&self) -> usize {
-        // TODO: dynamic reading of IP header with options
-        IP_HDR_MINSIZE as usize
+        self.ip_hdr().len().clamp(IP_HDR_MINSIZE, IP_HDR_MAXSIZE) as usize
     }
 
     #[inline(always)]

@@ -1,6 +1,7 @@
 use std::{
     cmp::Ordering,
     hash::{Hash, Hasher},
+    time::SystemTime,
 };
 
 use derive_more::Display;
@@ -25,17 +26,6 @@ impl Seq {
     pub fn get(&self) -> u32 {
         self.0
     }
-
-    // pub fn cmp(&self, other: Seq) -> Ordering {
-    //     let diff = self.0.wrapping_sub(other.0) as i32;
-    //     if diff < 0 {
-    //         Ordering::Less
-    //     } else if diff > 0 {
-    //         Ordering::Greater
-    //     } else {
-    //         Ordering::Equal
-    //     }
-    // }
 }
 
 // TODO: implement 4 microsecond clock, and make this nice
@@ -43,7 +33,7 @@ pub fn new_isn(con: &TCPCon) -> u32 {
     let key: &[u8; 16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let mut hasher = SipHasher13::new_with_key(key);
 
-    42.hash(&mut hasher);
+    SystemTime::now().hash(&mut hasher);
     con.hash(&mut hasher);
 
     hasher.finish() as u32

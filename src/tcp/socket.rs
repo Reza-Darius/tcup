@@ -201,6 +201,16 @@ pub struct TCPCon {
     pub remote_port: u16,
 }
 
+impl std::fmt::Display for TCPCon {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{} -> {}:{}",
+            self.local_ip, self.local_port, self.remote_ip, self.remote_port
+        )
+    }
+}
+
 impl TCPCon {
     pub fn local(&self) -> SocketAddrV4 {
         SocketAddrV4::new(self.local_ip, self.local_port)

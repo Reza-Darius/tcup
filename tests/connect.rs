@@ -1,13 +1,16 @@
 use std::{
-    io::{Read, Write},
-    net::{SocketAddrV4, TcpStream},
+    net::{
+        SocketAddr::{self},
+        SocketAddrV4, ToSocketAddrs,
+    },
     time::Duration,
 };
 
 use tokio::time::sleep;
+use tracing::info;
 
 #[tokio::test]
-async fn send_receive() {
+async fn connect() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
@@ -15,49 +18,39 @@ async fn send_receive() {
 
     // configuring the tap interface
     let if_name = "tcup0";
-    let if_addr = "10.0.0.1";
+    let if_addr = "10.0.1.1";
     let subnet = 24;
-    let virt_host: SocketAddrV4 = "10.0.0.2:4000".parse().unwrap();
+    let virt_host: SocketAddrV4 = "10.0.1.2:4000".parse().unwrap();
 
     let tcup = tcup::server::init(if_name, (if_addr.parse().unwrap(), subnet), virt_host)
         .await
         .unwrap();
 
-    let mut socket = tcup.listen(virt_host).await.unwrap();
-    let data = vec![2; 1460 * 4];
-    let data_len = data.len();
-    let response = vec![1; 1460 * 4];
-    let res_len = response.len();
-
-    // give some time for the listening socket to setup
-    sleep(Duration::from_secs(1)).await;
-
-    let handler = tokio::task::spawn_blocking(move || {
-        let mut stream = TcpStream::connect(virt_host).unwrap();
-        stream.write_all(&data).unwrap();
-
-        let mut buf = vec![0; 1460 * 4];
-        let mut snd_bytes = 0;
-
-        while snd_bytes < res_len {
-            snd_bytes += stream.read(&mut buf).unwrap();
+    let handle = tokio::task::spawn(async move {
+        let mut remote_addr = None;
+        for addr in "example.com:80".to_socket_addrs().unwrap() {
+            if let SocketAddr::V4(addr) = addr {
+                remote_addr = Some(addr);
+            }
         }
+        if remote_addr.is_none() {
+            panic!("couldnt get a v4 socket addr")
+        }
+        let mut socket = tcup
+            .connect(*virt_host.ip(), remote_addr.unwrap())
+            .await
+            .unwrap();
+        let request: Vec<u8> = b"GET / HTTP/1.1\r\n\
+                                Host: example.com\r\n\
+                                Connection: close\r\n\
+                                \r\n"
+            .to_vec();
+        socket.send(request).await.unwrap();
 
-        assert_eq!(snd_bytes, res_len);
+        sleep(Duration::from_secs(5)).await;
+        let buf = socket.recv().await.unwrap();
+        info!("read bytes {}", buf.len());
     });
 
-    // sleep to make sure we get all the data in one swoop since TCP doesnt make any promise about
-    // message boundaries
-    sleep(Duration::from_secs(1)).await;
-
-    let mut rcv_bytes = 0;
-    while rcv_bytes < data_len {
-        let rcv = socket.recv().await.unwrap();
-        rcv_bytes += rcv.len();
-    }
-
-    assert_eq!(rcv_bytes, data_len);
-
-    socket.send(response).await.unwrap();
-    handler.await.unwrap();
+    handle.await.unwrap();
 }

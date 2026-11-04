@@ -272,6 +272,12 @@ mod heap_test {
     }
 
     #[test]
+    fn handle_peek() {
+        let h = MinHeap::from([-3, 5, -10, 0, 7]);
+        assert_eq!(*h.peek().unwrap(), -10);
+    }
+
+    #[test]
     fn large_heap_sorted_output() {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
