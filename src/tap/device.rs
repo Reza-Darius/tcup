@@ -234,7 +234,7 @@ async fn await_udev(socket: MonitorSocket, name: impl AsRef<OsStr>) -> Result<()
             }
 
             // TODO: this might not be ideal
-            Ok(Err(e)) => break,
+            Ok(Err(_e)) => break,
 
             Err(_would_block) => {
                 continue;
@@ -332,7 +332,7 @@ impl TAPStream {
     }
 
     pub async fn send_frame(&mut self, packet: &Packet<ETH>) -> Result<(), TapError> {
-        let buf = packet.as_buf();
+        let _buf = packet.as_buf();
         self.tap
             .write_all(packet.as_buf())
             .await
@@ -395,23 +395,23 @@ impl AsyncWrite for TAPDevice {
             {
                 Ok(result) => {
                     trace!(?result, "async write: success");
-                    return Poll::Ready(result)
-                },
+                    return Poll::Ready(result);
+                }
                 Err(_would_block) => {
                     trace!("async write: WOULD BLOCK, tying again...");
-                    continue
-                },
+                    continue;
+                }
             }
         }
     }
 
     #[inline(always)]
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
 
     #[inline(always)]
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
 }

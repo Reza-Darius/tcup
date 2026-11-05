@@ -307,7 +307,11 @@ mod tests {
     fn new_rejects_oversized_payload() {
         // Bypass the normal Arp constructors (which always produce a
         // small, MTU-safe frame) to exercise the size guard directly.
-        let oversized = EthPayload::Arp(Packet::<ARP>::from_vec_unchecked(vec![0u8; ETH_FRAME_MAX_SIZE + 1]));
+        let oversized = EthPayload::Arp(Packet::<ARP>::from_vec_unchecked(vec![
+            0u8;
+            ETH_FRAME_MAX_SIZE
+                + 1
+        ]));
         Packet::<ETH>::new(Mac::from_octets(DMAC), Mac::from_octets(SMAC), oversized);
     }
 

@@ -1,8 +1,6 @@
 use std::cmp::{max, min};
 use std::time::{Duration, Instant};
 
-use tracing::trace;
-
 use crate::tcp::timer::CLOCK_GRANULARITY;
 
 const MIN: Duration = Duration::from_secs(1);
@@ -39,15 +37,6 @@ impl RTO {
         self.rto = min(self.rto.saturating_mul(2), MAX);
     }
 
-    pub fn cap_reached(&self) -> bool {
-        self.rto >= MAX
-    }
-
-    /// back to initial state (no measurements, RTO = 1s)
-    pub fn clear(&mut self) {
-        *self = Self::new();
-    }
-
     /// Feed an RTT sample. ONLY for ACKs of segments that weren't retransmitted (Karn).
     pub fn update(&mut self, sent: Instant, received: Instant) {
         let rtt = received.saturating_duration_since(sent);
@@ -68,7 +57,6 @@ impl RTO {
         self.rttvar = rttvar;
         self.rto =
             (srtt + max(Duration::from_millis(CLOCK_GRANULARITY), 4 * rttvar)).clamp(MIN, MAX);
-        trace!(?self.srtt, ?self.rttvar, ?self.rto, "updated RTO");
     }
 }
 

@@ -4,6 +4,7 @@ use std::{
 };
 
 use slab::Slab;
+use tokio::sync::oneshot;
 use tracing::{debug, error, instrument, trace, warn};
 
 use crate::{
@@ -34,6 +35,7 @@ pub struct TCPServiceV1 {
     out_svc: ARPServiceHandle,
 
     socket_table: Slab<SocketInternalHandle>,
+    queued_con_req: HashMap<TCPCon, oneshot::Sender<Result<SocketUserHandle, TCPError>>>,
 
     /// active connections
     con_table: HashMap<TCPCon, usize>,
@@ -55,23 +57,7 @@ impl TransportService for TCPServiceV1 {
                 local_addr,
                 remote_addr,
                 resp,
-            } => {
-                let handle = self.new_connect(local_addr, remote_addr).await;
-                let key: Option<(usize, TCPCon)> = if let Ok(ref h) = handle {
-                    Some((h.1, h.2))
-                } else {
-                    None
-                };
-
-                if let Err(e) = resp.send(handle.map(|h| h.0)) {
-                    if let Some((key, con)) = key {
-                        self.socket_table.remove(key);
-                        self.con_table.remove(&con);
-                    }
-                    error!("couldnt send response for connect socket: {:?}", e);
-                };
-                Ok(())
-            }
+            } => self.new_connect(local_addr, remote_addr, resp).await,
             SocketServiceCall::Listen { listen_addr, resp } => {
                 let handle = self.new_listen(listen_addr).await;
                 let key: Option<usize> = if let Ok(ref h) = handle {
@@ -89,7 +75,7 @@ impl TransportService for TCPServiceV1 {
                 };
                 Ok(())
             }
-            SocketServiceCall::Close { socket_key } => todo!(),
+            SocketServiceCall::Close { socket_key: _ } => todo!(),
 
             SocketServiceCall::Segment(packet) => self.service_segment(packet).await,
         }
@@ -102,6 +88,7 @@ impl TCPServiceV1 {
         Self {
             out_svc,
             socket_table: Slab::new(),
+            queued_con_req: HashMap::new(),
             con_table: HashMap::new(),
             listen_table: HashMap::new(),
             port_svc: PortService::new(),
@@ -137,7 +124,8 @@ impl TCPServiceV1 {
         &mut self,
         local_addr: Ipv4Addr,
         remote_addr: SocketAddrV4,
-    ) -> Result<(SocketUserHandle, usize, TCPCon), TCPError> {
+        resp: oneshot::Sender<Result<SocketUserHandle, TCPError>>,
+    ) -> Result<(), TCPError> {
         let port = self.port_svc.request();
         let local_addr = SocketAddrV4::new(local_addr, port);
         let con = TCPCon {
@@ -156,14 +144,14 @@ impl TCPServiceV1 {
             remote_addr,
             SOCKET_HANDLE_CHAN_SIZE,
             timer_tx,
+            resp,
         );
         let key = self.socket_table.vacant_key();
-        let user_handler = sock.user_handle(key);
 
         self.socket_table.insert(sock);
         self.con_table.insert(con, key);
 
-        Ok((user_handler, key, con))
+        Ok(())
     }
     // OPTIMIZE:
     // we are requesting the status for every submitted packet, no bueno!
@@ -181,6 +169,16 @@ impl TCPServiceV1 {
             .get(&seg_con)
             .and_then(|&key| self.socket_table.get(key))
         {
+            if con_sock.is_closed() {
+                trace!("con socket closed, removing from tables");
+
+                self.con_table.remove(&seg_con);
+                self.port_svc.free(seg_con.local_port);
+                return Err(TCPError::SocketError(
+                    "couldnt deliver segment: connection socket closed".into(),
+                ));
+            }
+
             trace!("connection found");
             match con_sock.send_seg(segment).await {
                 TCPState::Listen => {
@@ -212,6 +210,15 @@ impl TCPServiceV1 {
         };
 
         trace!("listening socket found");
+        if listen_sock.is_closed() {
+            trace!("listen socket closed, removing from tables");
+
+            self.listen_table.remove(&listen_addr);
+            self.port_svc.free(listen_addr.port());
+            return Err(TCPError::SocketError(
+                "couldnt deliver segment: listen socket closed".into(),
+            ));
+        }
 
         match listen_sock.send_seg(segment).await {
             // state didnt change

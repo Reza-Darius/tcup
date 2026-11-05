@@ -136,9 +136,16 @@ impl SocketInternalHandle {
         remote_address: SocketAddrV4,
         chan_size: usize,
         timer_tx: TCPTimerCBHandle,
+        resp: oneshot::Sender<Result<SocketUserHandle, TCPError>>,
     ) -> Self {
         let (s_tx, s_rx) = tokio::sync::mpsc::channel(chan_size);
         let mut skcb = SKCB::new(s_rx, ip_tx, local_address, timer_tx);
+
+        let pending_handler = SocketUserHandle {
+            socket_key: 0,
+            sender: s_tx.clone(),
+        };
+        skcb.pending_connect = Some((resp, pending_handler));
 
         let handle = tokio::spawn(async move {
             active_open(&mut skcb, remote_address).await.unwrap();

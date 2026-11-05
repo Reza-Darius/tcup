@@ -21,6 +21,8 @@ Tcup is an asynchronous virtual networking interface capable of handling TCP/IP 
 
 ## Quick demo
 
+### Listening Socket
+
 ```rust
 use std::{
     io::{Read, Write},

@@ -1,8 +1,4 @@
-#![allow(
-    unused_assignments,
-    non_camel_case_types,
-    clippy::upper_case_acronyms
-)]
+#![allow(unused_assignments, non_camel_case_types, clippy::upper_case_acronyms)]
 
 pub mod eth;
 pub mod ip;

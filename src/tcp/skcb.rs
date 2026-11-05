@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 use std::ops::{Deref, DerefMut};
 use std::time::Instant;
@@ -14,8 +13,8 @@ use crate::tcp::TCPState::{Closing, LastAck};
 use crate::tcp::buffer::{RecvBuf, SendBuf};
 use crate::tcp::error::TCPError::{self};
 use crate::tcp::handler::{TCP_HDR_MINSIZE, seg_handler};
-use crate::tcp::tcp_packet::{TCP_HDR_OFFSET, TCP_SEG_MAX_SIZE, TCPPayload};
-use crate::tcp::timer::{CONNECTION_LIFETIME_LIMIT, TCPTimerCBHandle, TimerKind};
+use crate::tcp::tcp_packet::{TCP_HDR_OFFSET, TCPPayload};
+use crate::tcp::timer::{CONNECTION_LIFETIME_LIMIT, TCPTimerCBHandle, TIME_WAIT, TimerKind};
 use crate::tcp::{
     opts::TCPOpts,
     rto::RTO,
@@ -32,8 +31,9 @@ pub const SYN_ACK_RETRIES: u64 = 5;
 
 pub const SND_RCV_BUF_SIZE: u16 = 10000;
 pub const SND_MAX_TRIES: u8 = 5;
-
+const DEFAULT_MSS: u16 = 536;
 const SYN_RETRY_LIMIT: u8 = 6;
+
 type Result<T> = std::result::Result<T, TCPError>;
 
 // this is just a wrapper, see below for the real meat and potatoes
@@ -77,6 +77,8 @@ pub struct SKCBInner {
 
     /// pending RECEIVE user request
     pub pending_rcv: Option<oneshot::Sender<Result<Vec<u8>>>>,
+    /// pending connect user request
+    pub pending_connect: Option<(oneshot::Sender<Result<SocketUserHandle>>, SocketUserHandle)>,
 
     pub timer_chan: TCPTimerCBHandle,
 }
@@ -100,6 +102,11 @@ pub struct TCB {
     pub snd_wl1: u32,
     /// segment acknowledgment number used for last window update
     pub snd_wl2: u32,
+    /// maximum segment size
+    pub snd_mss: u16,
+
+    /// congestion window
+    pub cwnd: u32,
 
     /// next byte to receive, incrementing this is equivalent to ACKing data in the response
     pub rcv_nxt: u32,
@@ -119,9 +126,6 @@ pub struct TCB {
     pub seg_len: u32,
     /// advertised window of the current segment
     pub seg_wnd: u16,
-
-    /// last sequence number of a segment
-    pub last_seq: u32,
 
     pub snd_opts: TCPOpts,
     pub rcv_opts: TCPOpts,
@@ -188,21 +192,25 @@ impl SKCB {
                 r_addr: None,
 
                 pending_rcv: None,
+                pending_connect: None,
                 timer_chan: timer_tx,
             }),
         };
 
         skcb.tcb.rcv_wnd = SND_RCV_BUF_SIZE;
+        skcb.tcb.snd_mss = DEFAULT_MSS;
         skcb
     }
 
     /// event loop listening for user calls, data segments and timers
     pub async fn run(mut self) -> Result<()> {
         loop {
-            trace!("waiting for event...");
+            self.check_connection_request();
+
             if matches!(self.status, TCPState::Closed) {
                 break;
             }
+            trace!("waiting for event...");
 
             // this select is biased as to not cause a race between an incoming packet
             // changing a packet then reacting to a fired timer
@@ -253,14 +261,13 @@ impl SKCB {
                     return Ok(());
                 }
 
-                // - retransmit segment
                 self.retransmit().await?;
-
-                // - start new RTO with backoff
                 self.tcb.rto.backoff();
                 self.start_rto().await;
             }
-            TimerKind::TimeWait => todo!(),
+            TimerKind::TimeWait | TimerKind::FinWait=> {
+                self.change_state(TCPState::Closed);
+            }
         }
         Ok(())
     }
@@ -347,6 +354,21 @@ impl SKCB {
         Ok(())
     }
 
+    // respond to outstanding connect request
+    fn check_connection_request(&mut self) {
+        if matches!(self.open, Open::Active)
+            && matches!(self.status, TCPState::Established)
+            && let Some((req, handle)) = self.pending_connect.take()
+        {
+            match req.send(Ok(handle)) {
+                Ok(_) => trace!("answered outstanding connection request"),
+                Err(_) => {
+                    error!("couldnt deliver handle to connection request");
+                    self.change_state(TCPState::Closed);
+                }
+            }
+        }
+    }
     /// get a header based on current TCB values
     #[inline(always)]
     fn hdr_template(&self) -> TCPHdr {
@@ -370,13 +392,17 @@ impl SKCB {
         }
     }
 
-    /// calculates the currently usable send window
+    /// gets the amount of bytes that can be sent in a segment
     pub(super) fn usable_window(&self) -> u32 {
-        self.tcb
+        // send window: SND_UNA + SND_WND - SND_NXT
+        let send_wnd = self
+            .tcb
             .snd_una
             .wrapping_add(self.tcb.snd_wnd as u32)
-            .wrapping_sub(self.tcb.snd_nxt)
-        // .min(self.tcb.snd_wnd as u32)
+            .wrapping_sub(self.tcb.snd_nxt);
+
+        // clampes by MSS
+        send_wnd.min(self.tcb.snd_mss as u32)
     }
 
     pub(super) fn is_synchronized(&self) -> bool {
@@ -394,19 +420,10 @@ impl SKCB {
             return None;
         }
 
-        if seq_gt(self.tcb.snd_nxt, self.tcb.snd_una) {
+        let n_send_bytes = self.usable_window().saturating_sub(opt_len as u32);
+        if n_send_bytes == 0 {
             return None;
         }
-
-        // we request at most mss - opt len bytes for the payload
-        let n_send_bytes = u32::min(
-            self.usable_window(),
-            self.tcb
-                .snd_opts
-                .mss
-                .expect("we need to know the MSS at this point") as u32
-                - opt_len as u32,
-        );
 
         let data = self.snd_buf.get_una_seg(n_send_bytes)?;
         let offset = TCP_HDR_OFFSET + TCP_HDR_MINSIZE + opt_len;
@@ -445,6 +462,7 @@ impl SKCB {
     /// updates the RTO with a RTT measruement, must only be called for a non retransmission
     pub(super) fn update_rto(&mut self, sent: Instant) {
         self.tcb.rto.update(sent, Instant::now());
+        trace!(rto = ?self.tcb.rto.rto(), "updated RTO");
     }
 
     /// disables the RTO timer
@@ -452,6 +470,13 @@ impl SKCB {
         trace!(rto = ?self.tcb.rto.rto(), "stopping RTO");
         self.tcb.rto_set = false;
         self.timer_chan.remove_timer(TimerKind::RTO).await;
+    }
+
+    pub(super) async fn start_time_wait(&mut self) {
+        let deadline = Instant::now() + TIME_WAIT;
+        self.timer_chan
+            .set_timer(TimerKind::TimeWait, deadline)
+            .await;
     }
 
     pub(super) async fn retransmit(&mut self) -> Result<()> {

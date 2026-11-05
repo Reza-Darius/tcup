@@ -83,7 +83,7 @@ impl Packet<IP> {
             .map_err(|e| ParseError(format!("couldnt extract header: {e}")))?
             .0;
 
-        Ipv4Prot::try_from(hdr.prot).map_err(|e| {
+        Ipv4Prot::try_from(hdr.prot).map_err(|_e| {
             trace!(hdr.prot, "unsupported IP payload protocol",);
             UnsupportedProtocol
         })?;

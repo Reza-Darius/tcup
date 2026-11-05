@@ -1,6 +1,5 @@
 use std::{
-    io::{Read, Write},
-    net::{SocketAddrV4, TcpStream},
+    net::SocketAddrV4,
     time::Duration,
 };
 
@@ -16,7 +15,7 @@ async fn main() {
     let subnet = 24;
     let virt_host: SocketAddrV4 = "10.0.0.2:4000".parse().unwrap();
 
-    let tcup = tcup::server::init(if_name, (if_addr.parse().unwrap(), subnet), virt_host)
+    let _tcup = tcup::server::init(if_name, (if_addr.parse().unwrap(), subnet), virt_host)
         .await
         .unwrap();
 

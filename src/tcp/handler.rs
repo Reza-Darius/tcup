@@ -9,6 +9,7 @@ use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::tcp::error::TCPError::HandlerError;
 use crate::tcp::seq::*;
 use crate::tcp::tcp_packet::{TCP_SEG_MAX_SIZE, TCPPayload};
+use crate::tcp::timer::{TIME_WAIT, TimerKind};
 use crate::tcp::{
     opts::TCPOpts,
     skcb::{Open, SKCB, TCPState},
@@ -253,10 +254,9 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         skcb.tcb.snd_wl2 = skcb.tcb.seg_ack;
 
         // If an MSS Option is not received at connection setup, TCP implementations MUST assume a default send MSS of 536 (576 - 40) for IPv4 or 1220 (1280 - 60) for IPv6 (MUST-15).
-        skcb.tcb.snd_opts = seg.options().unwrap_or_else(|| TCPOpts {
-            mss: Some(536),
-            ..Default::default()
-        });
+        if let Some(mss) = seg.options().and_then(|opts| opts.mss) {
+            skcb.tcb.snd_mss = mss;
+        }
 
         skcb.change_state(TCPState::Established);
 
@@ -318,10 +318,9 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         skcb.tcb.rcv_nxt = skcb.tcb.seg_seq.wrapping_add(1);
         skcb.tcb.irs = skcb.tcb.seg_seq;
         // If an MSS Option is not received at connection setup, TCP implementations MUST assume a default send MSS of 536 (576 - 40) for IPv4 or 1220 (1280 - 60) for IPv6 (MUST-15).
-        skcb.tcb.snd_opts = seg.options().unwrap_or_else(|| TCPOpts {
-            mss: Some(536),
-            ..Default::default()
-        });
+        if let Some(mss) = seg.options().and_then(|opts| opts.mss) {
+            skcb.tcb.snd_mss = mss;
+        }
 
         if ack_ok {
             skcb.tcb.snd_una = skcb.tcb.seg_ack;
@@ -385,14 +384,20 @@ async fn finwait1(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
             if sent_fin_accepted {
                 // we accepted a fin, and our fin was accepted
-                skcb.change_state(TCPState::TimeWait)
+                skcb.change_state(TCPState::TimeWait);
+                skcb.start_time_wait().await;
             } else {
                 // we accepted a fin, but our fin wasnt acked
                 skcb.change_state(TCPState::Closing)
             }
         }
         // we didnt get a fin, but our fin was accepted
-        _ if sent_fin_accepted => skcb.change_state(TCPState::FinWait2),
+        _ if sent_fin_accepted => {
+            skcb.change_state(TCPState::FinWait2);
+            skcb.timer_chan
+                .set_timer(TimerKind::FinWait, Instant::now() + TIME_WAIT)
+                .await;
+        }
         _ => {}
     };
 
@@ -412,6 +417,7 @@ async fn finwait2(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
     if matches!(accepted, AcceptResult::Fin) {
         skcb.tcb.rcv_nxt = skcb.tcb.rcv_nxt.wrapping_add(1);
         skcb.change_state(TCPState::TimeWait);
+        skcb.start_time_wait().await;
     }
     skcb.send_ack().await
 }
@@ -425,6 +431,7 @@ async fn closing(skcb: &mut SKCB, _: Packet<TCP>) -> Result<()> {
 
     if sent_fin_accepted {
         skcb.change_state(TCPState::TimeWait);
+        skcb.start_time_wait().await;
     }
     Ok(())
 }
@@ -442,6 +449,7 @@ async fn close_wait(skcb: &mut SKCB, _: Packet<TCP>) -> Result<()> {
         skcb.send_fin().await?;
         skcb.change_state(TCPState::LastAck);
     }
+    // TODO: we need some sort of "send data" routine here
     Ok(())
 }
 
@@ -464,7 +472,7 @@ async fn last_ack(skcb: &mut SKCB, _: Packet<TCP>) -> Result<()> {
 /// event handler for TIME WAIT state
 ///
 /// this is the lingering stage after the connection terminated
-async fn timewait(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
+async fn timewait(_skcb: &mut SKCB, _seg: Packet<TCP>) -> Result<()> {
     // TODO: deal with retrasnmitted FIN
     Ok(())
 }
@@ -505,58 +513,55 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
     let seg_seq = skcb.tcb.seg_seq;
     let snd_nxt = skcb.tcb.snd_nxt;
 
-    let ackd;
+    let mut ackd = false;
 
     // does the segment ACK in flight data (snd_una)?
     if seq_gt(seg_ack, snd_una) {
-        // does the ACK lie inside our sent data (snd_nxt)?
-        if seq_lte(seg_ack, snd_nxt) {
-            // we got an ACK within our send window, we can move it forward
-
-            // - pop data from sendbuffer/retransmission queue
-            let mut acked = seg_ack.wrapping_sub(snd_una) as usize;
-
-            // we have to handle the case where a FIN takes up a sequence number but doesnt mess
-            // with our buffer
-            if matches!(skcb.status, TCPState::FinWait1 | TCPState::LastAck) {
-                acked -= 1;
-            }
-
-            skcb.snd_buf.free(acked);
-            skcb.tcb.snd_una = seg_ack;
-            skcb.tcb.last_received_ack = Some(Instant::now());
-
-            // - If the received segment acknowledges all outstanding data (snd_una equals snd_max), the
-            //   retransmission timer is turned off. Otherwise, if the persist timer is off, the retransmit timer is restarted
-            if skcb.tcb.snd_una == skcb.tcb.snd_nxt {
-                trace!("all outstanding data ACKd, stopping RTO");
-                skcb.stop_rto().await;
-                skcb.tcb.rtt_probe = None;
-            } else {
-                // if we got an ack for outgoing data that wasnt a retransmission we can take a RTT
-                // measurment
-                if let Some(seg) = skcb.tcb.rtt_probe
-                    && !seg.retransmission
-                    && seq_gt(seg_ack, seg.seq_start)
-                {
-                    skcb.update_rto(seg.sent);
-
-                    // don't sample this transmission again.
-                    skcb.tcb.rtt_probe = None;
-                }
-                // section 5.3, restart RTO for an ACK that acknowledges new data
-                skcb.start_rto().await;
-            }
-
-            // TODO::
-            // - if the buffer has been fully acknowledged, return OK response to user
-            ackd = true;
-        } else {
+        if seq_gt(seg_ack, snd_nxt) {
+            // the ack lies beyond what we sent
             skcb.send_ack().await?;
             return Err(HandlerError("ACK lies beyond snd next".into()));
         }
-    } else {
-        ackd = false
+        // we got an ACK within our send window, we can move it forward
+
+        // - pop data from sendbuffer/retransmission queue
+        let mut acked = seg_ack.wrapping_sub(snd_una) as usize;
+
+        // we have to handle the case where a FIN takes up a sequence number but doesnt mess
+        // with our buffer
+        if matches!(skcb.status, TCPState::FinWait1 | TCPState::LastAck) {
+            acked -= 1;
+        }
+
+        skcb.snd_buf.free(acked);
+        skcb.tcb.snd_una = seg_ack;
+        skcb.tcb.last_received_ack = Some(Instant::now());
+
+        // - If the received segment acknowledges all outstanding data (snd_una equals snd_max), the
+        //   retransmission timer is turned off. Otherwise, if the persist timer is off, the retransmit timer is restarted
+        if skcb.tcb.snd_una == skcb.tcb.snd_nxt {
+            trace!("all outstanding data ACKd, stopping RTO");
+            skcb.stop_rto().await;
+            skcb.tcb.rtt_probe = None;
+        } else {
+            // if we got an ack for outgoing data that wasnt a retransmission we can take a RTT
+            // measurment
+            if let Some(seg) = skcb.tcb.rtt_probe
+                && !seg.retransmission
+                && seq_gt(seg_ack, seg.seq_start)
+            {
+                skcb.update_rto(seg.sent);
+
+                // don't sample this transmission again.
+                skcb.tcb.rtt_probe = None;
+            }
+            // section 5.3, restart RTO for an ACK that acknowledges new data
+            skcb.start_rto().await;
+        }
+
+        // TODO::
+        // - if the buffer has been fully acknowledged, return OK response to user
+        ackd = true;
     };
 
     // update send window

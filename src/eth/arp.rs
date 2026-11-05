@@ -22,7 +22,7 @@ pub enum ARPServiceResult {
 impl Packet<ARP> {
     pub(super) fn parse(eth: Packet<ETH>) -> Result<Self, EthErr> {
         let data = eth.into_buf();
-        let arp = ArpMsg::ref_from_prefix(&data[ETH_HDR_SIZE..])
+        let _arp = ArpMsg::ref_from_prefix(&data[ETH_HDR_SIZE..])
             .map_err(|_| EthErr::ParseError("arp parse error"))?
             .0;
 

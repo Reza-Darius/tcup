@@ -1,9 +1,7 @@
-use std::{
-    net::{
-        SocketAddr::{self},
-        SocketAddrV4, ToSocketAddrs,
-    },
-};
+use std::{net::{
+    SocketAddr::{self},
+    SocketAddrV4, ToSocketAddrs,
+}, time::Duration};
 
 use tracing::info;
 
@@ -38,6 +36,7 @@ async fn connect() {
             .connect(*virt_host.ip(), remote_addr.unwrap())
             .await
             .unwrap();
+        info!("we got a socket");
         let request: Vec<u8> = b"GET / HTTP/1.1\r\n\
                                 Host: example.com\r\n\
                                 Connection: close\r\n\
@@ -49,5 +48,6 @@ async fn connect() {
         info!("read data:\n {}", std::str::from_utf8(&buf).unwrap());
     });
 
+    tokio::time::sleep(Duration::from_secs(1)).await;
     handle.await.unwrap();
 }

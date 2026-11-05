@@ -17,6 +17,7 @@ pub const TIME_WAIT: Duration = MSL.saturating_mul(2);
 
 /// Maximum segment lifetime
 pub const MSL: Duration = Duration::from_secs(60);
+pub const FIN_TIMEOUT: Duration = Duration::from_secs(60);
 pub const CONNECTION_LIFETIME_LIMIT: Duration = Duration::from_secs(100);
 
 pub const CLOCK_GRANULARITY: u64 = 10; // miliseconds
@@ -46,9 +47,10 @@ impl PartialOrd for Timer {
 pub enum TimerKind {
     RTO,
     TimeWait,
+    FinWait,
 }
 
-const N_TIMER: usize = 2;
+const N_TIMER: usize = 3;
 
 struct SocketEntry {
     sender: Sender<TimerKind>,
