@@ -75,8 +75,8 @@ pub struct SKCBInner {
     /// buffer for incoming data
     pub rcv_buf: RecvBuf,
 
-    /// pending RECEIVE user calls
-    pub pending_rcv: VecDeque<oneshot::Sender<Result<Vec<u8>>>>,
+    /// pending RECEIVE user request
+    pub pending_rcv: Option<oneshot::Sender<Result<Vec<u8>>>>,
 
     pub timer_chan: TCPTimerCBHandle,
 }
@@ -187,7 +187,7 @@ impl SKCB {
                 l_addr: local_addr,
                 r_addr: None,
 
-                pending_rcv: VecDeque::new(),
+                pending_rcv: None,
                 timer_chan: timer_tx,
             }),
         };
@@ -226,6 +226,7 @@ impl SKCB {
             }
         }
 
+        self.try_empty_rcv_buffer();
         debug!("closing socket");
         Ok(())
     }
@@ -236,6 +237,7 @@ impl SKCB {
             TimerKind::RTO => {
                 trace!("RTO fired");
 
+                // TODO: this is probably no ideal
                 if matches!(self.status, TCPState::SynSent | TCPState::SynReceived)
                     && self.tcb.syn_retries > SYN_RETRY_LIMIT
                 {
@@ -274,6 +276,7 @@ impl SKCB {
             SKCBMessage::Segment(packet) => {
                 if let Some(remote_addr) = self.r_addr
                     && remote_addr != packet.s_addr()
+                // is this segment for us?
                 {
                     trace!(packet_addr = %packet.s_addr(), ?self.r_addr, "addr mismatch, dropping segment");
                     return Ok(());
@@ -282,10 +285,9 @@ impl SKCB {
                 self.update_tcb(&packet);
                 seg_handler(self, packet).await?;
             }
-            // TODO: how do we deal with multiple receive calls?
             SKCBMessage::Receive { resp } => {
                 if !self.is_synchronized() {
-                    self.pending_rcv.push_back(resp);
+                    self.pending_rcv = Some(resp);
                     return Ok(());
                 }
 
@@ -293,7 +295,7 @@ impl SKCB {
                     resp.send(Ok(data)).map_err(|_| ChannelError)?;
                     self.tcb.rcv_wnd = self.rcv_buf.available_cap();
                 } else {
-                    self.pending_rcv.push_back(resp);
+                    self.pending_rcv = Some(resp);
                     trace!("cant service receive request, queueing it")
                 }
             }
@@ -701,13 +703,13 @@ impl SKCB {
 
     /// tries to pull bytes out of the rcv buffer if we have a pending request
     pub(super) fn try_empty_rcv_buffer(&mut self) {
-        if !self.pending_rcv.is_empty() // we dont pop front to not lose the sender
+        if self.pending_rcv.is_some() // we dont pop front to not lose the sender
             && let Some(data) = self.rcv_buf.pop_first()
         {
             trace!("servicing queued receive request");
 
             self.pending_rcv
-                .pop_front()
+                .take()
                 .expect("we just checked")
                 .send(Ok(data))
                 .expect("the receiver should block on this call");

@@ -3,10 +3,8 @@ use std::{
         SocketAddr::{self},
         SocketAddrV4, ToSocketAddrs,
     },
-    time::Duration,
 };
 
-use tokio::time::sleep;
 use tracing::info;
 
 #[tokio::test]
@@ -47,9 +45,8 @@ async fn connect() {
             .to_vec();
         socket.send(request).await.unwrap();
 
-        sleep(Duration::from_secs(5)).await;
         let buf = socket.recv().await.unwrap();
-        info!("read bytes {}", buf.len());
+        info!("read data:\n {}", std::str::from_utf8(&buf).unwrap());
     });
 
     handle.await.unwrap();
