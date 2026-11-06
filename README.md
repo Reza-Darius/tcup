@@ -51,34 +51,29 @@ async fn connect() {
         .await
         .unwrap();
 
-    let handle = tokio::task::spawn(async move {
-        let mut remote_addr = None;
-        for addr in "example.com:80".to_socket_addrs().unwrap() {
-            if let SocketAddr::V4(addr) = addr {
-                remote_addr = Some(addr);
-            }
+    let mut remote_addr = None;
+    for addr in "example.com:80".to_socket_addrs().unwrap() {
+        if let SocketAddr::V4(addr) = addr {
+            remote_addr = Some(addr);
         }
-        if remote_addr.is_none() {
-            panic!("couldnt get a v4 socket addr")
-        }
-        let mut socket = tcup
-            .connect(*virt_host.ip(), remote_addr.unwrap())
-            .await
-            .unwrap();
-        info!("we got a socket");
-        let request: Vec<u8> = b"GET / HTTP/1.1\r\n\
+    }
+    if remote_addr.is_none() {
+        panic!("couldnt get a v4 socket addr")
+    }
+    let mut socket = tcup
+        .connect(*virt_host.ip(), remote_addr.unwrap())
+        .await
+        .unwrap();
+    info!("we got a socket");
+    let request: Vec<u8> = b"GET / HTTP/1.1\r\n\
                                 Host: example.com\r\n\
                                 Connection: close\r\n\
                                 \r\n"
-            .to_vec();
-        socket.send(request).await.unwrap();
+        .to_vec();
+    socket.send(request).await.unwrap();
 
-        let buf = socket.recv().await.unwrap();
-        info!("read data:\n {}", std::str::from_utf8(&buf).unwrap());
-    });
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    handle.await.unwrap();
+    let buf = socket.recv().await.unwrap();
+    println!("read data:\n {}", std::str::from_utf8(&buf).unwrap());
 }
 ```
 
