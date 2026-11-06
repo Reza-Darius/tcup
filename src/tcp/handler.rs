@@ -8,8 +8,9 @@ use super::error::TCPError;
 use crate::eth::ETH_FRAME_MAX_SIZE;
 use crate::tcp::error::TCPError::HandlerError;
 use crate::tcp::seq::*;
-use crate::tcp::tcp_packet::{TCP_SEG_MAX_SIZE, TCPPayload};
-use crate::tcp::timer::{TIME_WAIT, TimerKind};
+use crate::tcp::skcb::INITIAL_CWND_FACTOR;
+use crate::tcp::tcp_packet::{TCP_HDR_MINSIZE, TCP_SEG_MAX_SIZE, TCPPayload};
+use crate::tcp::timer::{FIN_TIMEOUT, TimerKind};
 use crate::tcp::{
     opts::TCPOpts,
     skcb::{Open, SKCB, TCPState},
@@ -17,15 +18,10 @@ use crate::tcp::{
 };
 use crate::utils::packet::{Packet, TCP};
 
-pub const TCP_HDR_MINSIZE: usize = 20;
-pub const TCP_HDR_MAXSIZE: usize = 60;
-pub const TCP_PSEUDOHDR_SIZE: usize = 12;
-pub const TCP_OPT_MAX_SIZE: usize = TCP_HDR_MAXSIZE - TCP_HDR_MINSIZE;
 pub const WRD_SIZE: usize = 4;
 pub const WND_SIZE: u16 = 10000;
 
 pub const CHAN_BUF_SIZE: usize = ETH_FRAME_MAX_SIZE * 100;
-pub const SYN_ACK_RETRIES: u64 = 5;
 
 type Result<T> = std::result::Result<T, TCPError>;
 
@@ -257,6 +253,8 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         if let Some(mss) = seg.options().and_then(|opts| opts.mss) {
             skcb.tcb.snd_mss = mss;
         }
+        skcb.tcb.cwnd = (INITIAL_CWND_FACTOR as u16 + skcb.tcb.snd_mss) as u32;
+        skcb.tcb.ssthresh = u16::MAX as u32;
 
         skcb.change_state(TCPState::Established);
 
@@ -321,6 +319,8 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         if let Some(mss) = seg.options().and_then(|opts| opts.mss) {
             skcb.tcb.snd_mss = mss;
         }
+        skcb.tcb.cwnd = (INITIAL_CWND_FACTOR as u16 + skcb.tcb.snd_mss) as u32;
+        skcb.tcb.ssthresh = u16::MAX as u32;
 
         if ack_ok {
             skcb.tcb.snd_una = skcb.tcb.seg_ack;
@@ -395,7 +395,7 @@ async fn finwait1(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         _ if sent_fin_accepted => {
             skcb.change_state(TCPState::FinWait2);
             skcb.timer_chan
-                .set_timer(TimerKind::FinWait, Instant::now() + TIME_WAIT)
+                .set_timer(TimerKind::FinWait, Instant::now() + FIN_TIMEOUT)
                 .await;
         }
         _ => {}
@@ -536,6 +536,14 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
         skcb.snd_buf.free(acked);
         skcb.tcb.snd_una = seg_ack;
         skcb.tcb.last_received_ack = Some(Instant::now());
+
+        // adjusting congestion window
+        if skcb.tcb.cwnd < skcb.tcb.ssthresh {
+            skcb.tcb.cwnd += u32::min(acked as u32, skcb.tcb.snd_mss as u32);
+        } else {
+            let mss = skcb.tcb.snd_mss as u32;
+            skcb.tcb.cwnd += (mss * mss) / skcb.tcb.cwnd;
+        }
 
         // - If the received segment acknowledges all outstanding data (snd_una equals snd_max), the
         //   retransmission timer is turned off. Otherwise, if the persist timer is off, the retransmit timer is restarted

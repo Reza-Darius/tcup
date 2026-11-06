@@ -12,12 +12,14 @@ use tracing::{debug, trace};
 
 use crate::tcp::heap::MinHeap;
 
-/// After sending the final FIN+ACK, you must linger before fully closing the socket. Prevents old duplicate segments from a dead connection being mistaken for a new one.
-pub const TIME_WAIT: Duration = MSL.saturating_mul(2);
+/// Maximum segment lifetime, the amount of time a given packet can remain inside the network
+pub const MSL: Duration = Duration::from_mins(2);
 
-/// Maximum segment lifetime
-pub const MSL: Duration = Duration::from_secs(60);
+/// the FIN_WAIT2 state says we have sent a fin, its been ackd, and we are waiting for a fin from
+/// the other side, this fin might never arrive, hence the extra timeout
 pub const FIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// should acks for outstanding data not arrive within this timeframe the connection is considered dead
 pub const CONNECTION_LIFETIME_LIMIT: Duration = Duration::from_secs(100);
 
 pub const CLOCK_GRANULARITY: u64 = 10; // miliseconds

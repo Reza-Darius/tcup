@@ -12,9 +12,9 @@ use crate::tcp::TCPError::{ChannelError, SKCBError};
 use crate::tcp::TCPState::{Closing, LastAck};
 use crate::tcp::buffer::{RecvBuf, SendBuf};
 use crate::tcp::error::TCPError::{self};
-use crate::tcp::handler::{TCP_HDR_MINSIZE, seg_handler};
-use crate::tcp::tcp_packet::{TCP_HDR_OFFSET, TCPPayload};
-use crate::tcp::timer::{CONNECTION_LIFETIME_LIMIT, TCPTimerCBHandle, TIME_WAIT, TimerKind};
+use crate::tcp::handler::seg_handler;
+use crate::tcp::tcp_packet::{TCP_HDR_MINSIZE, TCP_HDR_OFFSET, TCPPayload};
+use crate::tcp::timer::{CONNECTION_LIFETIME_LIMIT, MSL, TCPTimerCBHandle, TimerKind};
 use crate::tcp::{
     opts::TCPOpts,
     rto::RTO,
@@ -27,12 +27,13 @@ use crate::utils::packet::{Packet, TCP};
 pub const WRD_SIZE: usize = 4;
 
 pub const CHAN_BUF_SIZE: usize = ETH_FRAME_MAX_SIZE * 100;
-pub const SYN_ACK_RETRIES: u64 = 5;
 
 pub const SND_RCV_BUF_SIZE: u16 = 10000;
-pub const SND_MAX_TRIES: u8 = 5;
 const DEFAULT_MSS: u16 = 536;
 const SYN_RETRY_LIMIT: u8 = 6;
+
+/// the initial multiplier for the slow-start congestion control algorithm
+pub const INITIAL_CWND_FACTOR: u8 = 10;
 
 type Result<T> = std::result::Result<T, TCPError>;
 
@@ -96,21 +97,25 @@ pub struct TCB {
     pub snd_una: u32,
     /// data that could be sent, usually the seq in the reply
     pub snd_nxt: u32,
-    /// window size (upper limit) = UNA + window size
+    /// sender advertised window size, usable bytes are calculated by: UNA + window size
     pub snd_wnd: u16,
     /// segment sequence number used for last window update
     pub snd_wl1: u32,
     /// segment acknowledgment number used for last window update
     pub snd_wl2: u32,
-    /// maximum segment size
+    /// sender maximum segment size
     pub snd_mss: u16,
 
     /// congestion window
     pub cwnd: u32,
+    /// slow start threshhold
+    pub ssthresh: u32,
+    /// the seq number of the last retransmission
+    pub last_rt_seq: u32,
 
     /// next byte to receive, incrementing this is equivalent to ACKing data in the response
     pub rcv_nxt: u32,
-    /// future seq number not yet allowed (upper limit)
+    /// receiver advertised window size
     pub rcv_wnd: u16,
 
     /// initial send sequence number
@@ -265,7 +270,7 @@ impl SKCB {
                 self.tcb.rto.backoff();
                 self.start_rto().await;
             }
-            TimerKind::TimeWait | TimerKind::FinWait=> {
+            TimerKind::TimeWait | TimerKind::FinWait => {
                 self.change_state(TCPState::Closed);
             }
         }
@@ -392,17 +397,24 @@ impl SKCB {
         }
     }
 
-    /// gets the amount of bytes that can be sent in a segment
+    /// gets the amount of bytes that can be sent
     pub(super) fn usable_window(&self) -> u32 {
         // send window: SND_UNA + SND_WND - SND_NXT
-        let send_wnd = self
+        let snd_wnd = self
             .tcb
             .snd_una
             .wrapping_add(self.tcb.snd_wnd as u32)
             .wrapping_sub(self.tcb.snd_nxt);
 
-        // clampes by MSS
-        send_wnd.min(self.tcb.snd_mss as u32)
+        // congestion window: SND_UNA + CWND - SND_NXT
+        let cwnd = self
+            .tcb
+            .snd_una
+            .wrapping_add(self.tcb.cwnd)
+            .wrapping_sub(self.tcb.snd_nxt);
+
+        trace!(snd_wnd, cwnd, "usable window");
+        u32::min(snd_wnd, cwnd)
     }
 
     pub(super) fn is_synchronized(&self) -> bool {
@@ -420,7 +432,10 @@ impl SKCB {
             return None;
         }
 
-        let n_send_bytes = self.usable_window().saturating_sub(opt_len as u32);
+        let n_send_bytes = self
+            .usable_window()
+            .min(self.tcb.snd_mss as u32)
+            .saturating_sub(opt_len as u32);
         if n_send_bytes == 0 {
             return None;
         }
@@ -473,7 +488,7 @@ impl SKCB {
     }
 
     pub(super) async fn start_time_wait(&mut self) {
-        let deadline = Instant::now() + TIME_WAIT;
+        let deadline = Instant::now() + MSL;
         self.timer_chan
             .set_timer(TimerKind::TimeWait, deadline)
             .await;
@@ -509,6 +524,14 @@ impl SKCB {
         }
 
         hdr.seq = self.tcb.snd_una.into();
+
+        // adjust congestion window
+        if self.tcb.last_rt_seq != self.tcb.snd_una {
+            let flight_size = self.tcb.snd_nxt.wrapping_sub(self.tcb.snd_una);
+            self.tcb.ssthresh = u32::max(flight_size / 2, self.tcb.snd_mss as u32 * 2);
+        }
+        self.tcb.cwnd = self.tcb.snd_mss as u32;
+        self.tcb.last_rt_seq = self.tcb.snd_una;
 
         let offset = TCP_HDR_OFFSET + TCP_HDR_MINSIZE;
         let payload = self
