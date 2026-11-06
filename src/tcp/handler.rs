@@ -253,12 +253,13 @@ async fn syn_received(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         if let Some(mss) = seg.options().and_then(|opts| opts.mss) {
             skcb.tcb.snd_mss = mss;
         }
-        skcb.tcb.cwnd = (INITIAL_CWND_FACTOR as u16 + skcb.tcb.snd_mss) as u32;
+        skcb.tcb.cwnd = (INITIAL_CWND_FACTOR as u16 * skcb.tcb.snd_mss) as u32;
         skcb.tcb.ssthresh = u16::MAX as u32;
 
         skcb.change_state(TCPState::Established);
 
         // our syn got acked, we move the window
+        skcb.try_take_rtt_sample();
         skcb.tcb.snd_una = skcb.tcb.seg_ack;
         skcb.tcb.last_received_ack = Some(Instant::now());
         return established(skcb, seg).await;
@@ -319,7 +320,7 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
         if let Some(mss) = seg.options().and_then(|opts| opts.mss) {
             skcb.tcb.snd_mss = mss;
         }
-        skcb.tcb.cwnd = (INITIAL_CWND_FACTOR as u16 + skcb.tcb.snd_mss) as u32;
+        skcb.tcb.cwnd = (INITIAL_CWND_FACTOR as u16 * skcb.tcb.snd_mss) as u32;
         skcb.tcb.ssthresh = u16::MAX as u32;
 
         if ack_ok {
@@ -335,6 +336,7 @@ async fn syn_sent(skcb: &mut SKCB, seg: Packet<TCP>) -> Result<()> {
 
         if seq_gt(skcb.tcb.snd_una, skcb.tcb.iss) {
             skcb.change_state(TCPState::Established);
+            skcb.try_take_rtt_sample();
             skcb.send_ack().await?;
         } else {
             // simultaneous open path: we got a syn but not ack in response to our syn
@@ -545,24 +547,14 @@ async fn check_ack(skcb: &mut SKCB) -> Result<bool> {
             skcb.tcb.cwnd += (mss * mss) / skcb.tcb.cwnd;
         }
 
+        skcb.try_take_rtt_sample();
+
         // - If the received segment acknowledges all outstanding data (snd_una equals snd_max), the
         //   retransmission timer is turned off. Otherwise, if the persist timer is off, the retransmit timer is restarted
         if skcb.tcb.snd_una == skcb.tcb.snd_nxt {
             trace!("all outstanding data ACKd, stopping RTO");
             skcb.stop_rto().await;
-            skcb.tcb.rtt_probe = None;
         } else {
-            // if we got an ack for outgoing data that wasnt a retransmission we can take a RTT
-            // measurment
-            if let Some(seg) = skcb.tcb.rtt_probe
-                && !seg.retransmission
-                && seq_gt(seg_ack, seg.seq_start)
-            {
-                skcb.update_rto(seg.sent);
-
-                // don't sample this transmission again.
-                skcb.tcb.rtt_probe = None;
-            }
             // section 5.3, restart RTO for an ACK that acknowledges new data
             skcb.start_rto().await;
         }

@@ -202,6 +202,7 @@ impl SKCB {
             }),
         };
 
+        skcb.tcb.ssthresh = u16::MAX as u32; // setting this to an arbitrary high value
         skcb.tcb.rcv_wnd = SND_RCV_BUF_SIZE;
         skcb.tcb.snd_mss = DEFAULT_MSS;
         skcb
@@ -265,6 +266,15 @@ impl SKCB {
                     self.change_state(TCPState::Closed);
                     return Ok(());
                 }
+
+                // adjust congestion window
+                // if we retransmit as segment for the first time we update ssthresh
+                if self.tcb.last_rt_seq != self.tcb.snd_una {
+                    let flight_size = self.tcb.snd_nxt.wrapping_sub(self.tcb.snd_una);
+                    self.tcb.ssthresh = u32::max(flight_size / 2, self.tcb.snd_mss as u32 * 2);
+                }
+                self.tcb.cwnd = self.tcb.snd_mss as u32;
+                self.tcb.last_rt_seq = self.tcb.snd_una;
 
                 self.retransmit().await?;
                 self.tcb.rto.backoff();
@@ -494,9 +504,24 @@ impl SKCB {
             .await;
     }
 
+    pub(super) fn try_take_rtt_sample(&mut self) {
+        // if we got an ack for outgoing data that wasnt a retransmission we can take a RTT
+        // measurment
+        if let Some(seg) = self.tcb.rtt_probe
+            && !seg.retransmission
+            && seq_gt(self.tcb.seg_ack, seg.seq_start)
+        {
+            self.update_rto(seg.sent);
+
+            // don't sample this transmission again.
+            self.tcb.rtt_probe = None;
+        }
+    }
+
     pub(super) async fn retransmit(&mut self) -> Result<()> {
-        let mut hdr = self.hdr_template();
         let con = self.con();
+        let mut hdr = self.hdr_template();
+        hdr.seq = self.tcb.snd_una.into();
 
         // get a payload
         let mut seg_len = self.tcb.snd_nxt.wrapping_sub(self.tcb.snd_una);
@@ -522,16 +547,6 @@ impl SKCB {
             }
             _ => {}
         }
-
-        hdr.seq = self.tcb.snd_una.into();
-
-        // adjust congestion window
-        if self.tcb.last_rt_seq != self.tcb.snd_una {
-            let flight_size = self.tcb.snd_nxt.wrapping_sub(self.tcb.snd_una);
-            self.tcb.ssthresh = u32::max(flight_size / 2, self.tcb.snd_mss as u32 * 2);
-        }
-        self.tcb.cwnd = self.tcb.snd_mss as u32;
-        self.tcb.last_rt_seq = self.tcb.snd_una;
 
         let offset = TCP_HDR_OFFSET + TCP_HDR_MINSIZE;
         let payload = self
@@ -567,7 +582,7 @@ impl SKCB {
         Ok(())
     }
 
-    /// sends a packet out through the open connection
+    /// sends new data out to the connection
     pub(super) async fn output(
         &mut self,
         mut hdr: TCPHdr,
@@ -593,13 +608,13 @@ impl SKCB {
         }
 
         // prepare a new RTT probe for RTO
-        if self.inner.tcb.rtt_probe.is_none() {
-            let seq_start = hdr.seq.get();
-            let seq_end = seq_start.wrapping_add(
-                payload.as_ref().map(|payload| payload.len()).unwrap_or(0) as u32
-                    + u32::from(hdr.is_syn())
-                    + u32::from(hdr.is_fin()),
-            );
+        let seq_start = hdr.seq.get();
+        let seg_len = payload.as_ref().map(|payload| payload.len()).unwrap_or(0) as u32;
+        let seq_end =
+            seq_start.wrapping_add(seg_len + u32::from(hdr.is_syn()) + u32::from(hdr.is_fin()));
+
+        if seq_end > seq_start && self.inner.tcb.rtt_probe.is_none() {
+            trace!("new RTT probe");
             self.inner.tcb.rtt_probe = Some(SentSegment {
                 seq_start,
                 seq_end,
@@ -619,7 +634,7 @@ impl SKCB {
 
         let packet = Packet::<TCP>::new(con.local_ip, con.remote_ip, hdr, opts, payload);
 
-        debug!(%hdr, "sending packet out"); // this prints incomplete information about the header but thats fine
+        debug!(%hdr, seg_len, "sending packet out"); // this prints incomplete information about the header but thats fine
         self.out_chan.send(packet.into()).await;
         Ok(())
     }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# a script to setup iptables such that the connect.rs program can run properly
+# a script to setup iptables such that the tests/connect.rs program can run properly
 # us with arg "up" to apply and "down" to revert
 
 # Check whether the script is running as root.

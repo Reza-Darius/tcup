@@ -1,6 +1,8 @@
 use std::cmp::{max, min};
 use std::time::{Duration, Instant};
 
+use tracing::trace;
+
 use crate::tcp::timer::CLOCK_GRANULARITY;
 
 const MIN: Duration = Duration::from_secs(1);
@@ -41,6 +43,12 @@ impl RTO {
     pub fn update(&mut self, sent: Instant, received: Instant) {
         let rtt = received.saturating_duration_since(sent);
 
+        trace!(
+            ?self.srtt,
+            ?self.rttvar,
+            ?rtt,
+            "RTT estimator before update"
+        );
         let (srtt, rttvar) = match self.srtt {
             None => (rtt, rtt / 2), // first measure, §2.2
             Some(srtt) => {
@@ -57,6 +65,7 @@ impl RTO {
         self.rttvar = rttvar;
         self.rto =
             (srtt + max(Duration::from_millis(CLOCK_GRANULARITY), 4 * rttvar)).clamp(MIN, MAX);
+        trace!(rto = ?self.rto, ?self.srtt, ?self.rttvar, ?sent, ?received, "updated RTO");
     }
 }
 
