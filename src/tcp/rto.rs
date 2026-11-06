@@ -43,12 +43,6 @@ impl RTO {
     pub fn update(&mut self, sent: Instant, received: Instant) {
         let rtt = received.saturating_duration_since(sent);
 
-        trace!(
-            ?self.srtt,
-            ?self.rttvar,
-            ?rtt,
-            "RTT estimator before update"
-        );
         let (srtt, rttvar) = match self.srtt {
             None => (rtt, rtt / 2), // first measure, §2.2
             Some(srtt) => {
