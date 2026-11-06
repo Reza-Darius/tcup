@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# a script to setup iptables such that the connect.rs program can run properly
+# us with arg "up" to apply and "down" to revert
+
 # Check whether the script is running as root.
 # $EUID = effective user ID (0 means root).
 # -ne = "not equal".
@@ -30,6 +33,8 @@ case "$1" in
         ;;
 
     down)
+        sysctl -w net.ipv4.ip_forward=0
+
         # -D deletes the matching iptables rule.
         iptables -t nat -D POSTROUTING -s 10.0.1.0/24 ! -o tcup0 -j MASQUERADE
         iptables -D FORWARD -i tcup0 -j ACCEPT
